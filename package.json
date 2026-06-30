@@ -1,0 +1,10 @@
+{
+  "name": "livewalk-marketplace-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/index.js",
+    "test": "node test/api-cycle.test.mjs"
+  }
+}
