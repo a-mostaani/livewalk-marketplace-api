@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
 import app from '../src/index.js';
 
+const subtleProto = Object.getPrototypeOf(globalThis.crypto.subtle);
+const originalDeriveBits = subtleProto.deriveBits;
+let highestPbkdf2Iterations = 0;
+subtleProto.deriveBits = function patchedDeriveBits(algorithm, ...args) {
+  if (algorithm?.name === 'PBKDF2') {
+    highestPbkdf2Iterations = Math.max(highestPbkdf2Iterations, Number(algorithm.iterations || 0));
+    if (algorithm.iterations > 100000) {
+      throw new Error(`Pbkdf2 failed: iteration counts above 100000 are not supported (requested ${algorithm.iterations})`);
+    }
+  }
+  return originalDeriveBits.call(this, algorithm, ...args);
+};
+
 async function call(path, options = {}, token = '') {
   const response = await app.fetch(new Request(`https://local.test${path}`, {
     ...options,
@@ -14,7 +27,10 @@ async function call(path, options = {}, token = '') {
 await call('/api/demo/reset', { method: 'POST' });
 const travelerAuth = await call('/api/auth/register', { method: 'POST', body: JSON.stringify({ role: 'traveler', name: 'Sofia R.', email: 'sofia@example.test', password: 'secret123' }) });
 const guideAuth = await call('/api/auth/register', { method: 'POST', body: JSON.stringify({ role: 'guide', name: 'Yuki Tanaka', email: 'yuki@example.test', password: 'secret123' }) });
-const travelerToken = travelerAuth.body.token;
+const travelerLogin = await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'sofia@example.test', password: 'secret123' }) });
+assert.equal(travelerLogin.body.user.id, travelerAuth.body.user.id);
+assert.equal(highestPbkdf2Iterations, 100000);
+const travelerToken = travelerLogin.body.token;
 const guideToken = guideAuth.body.token;
 
 const created = await call('/api/requests', {

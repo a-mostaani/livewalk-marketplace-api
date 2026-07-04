@@ -34,6 +34,7 @@ const publicRequest = (request) => request ? { ...request, route: route(request)
 const publicSession = (session) => session ? { ...session } : null;
 const newestFirst = (items) => [...items].sort((a, b) => String(b.createdAt || b.updatedAt).localeCompare(String(a.createdAt || a.updatedAt)));
 const TOKEN_DAYS = 30;
+const PBKDF2_ITERATIONS = 100000;
 
 function bytesToBase64(bytes) {
   let binary = '';
@@ -61,7 +62,7 @@ async function sha256(value) {
 
 async function hashPassword(password, salt = randomBase64(16)) {
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(String(password)), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: base64ToBytes(salt), iterations: 120000, hash: 'SHA-256' }, key, 256);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: base64ToBytes(salt), iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' }, key, 256);
   return { salt, hash: bytesToBase64(new Uint8Array(bits)) };
 }
 
