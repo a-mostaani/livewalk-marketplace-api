@@ -365,7 +365,11 @@ async function handle(request, env = {}) {
   try {
     if (path === '/') return json({ ok: true, service: 'LiveWalk marketplace API', storage: env?.HYPERDRIVE?.connectionString ? 'postgres-shared-demo' : 'edge-memory-demo', endpoints: ['/api/health', '/api/requests'] });
     if (path === '/api/health') return json({ ok: true, ...(await storage.health()), time: now() });
-    if (path === '/api/demo/reset' && request.method === 'POST') { await storage.reset(); return json({ ok: true, reset: true }); }
+    if (path === '/api/demo/reset' && request.method === 'POST') {
+      if (env?.HYPERDRIVE?.connectionString && env.ALLOW_DEMO_RESET !== 'true') return json({ ok: false, error: 'Demo reset disabled' }, 403);
+      await storage.reset();
+      return json({ ok: true, reset: true });
+    }
     if (path === '/api/requests' && request.method === 'POST') return json({ ok: true, request: await storage.createRequest(await body(request)) }, 201);
     if (path === '/api/requests' && request.method === 'GET') return json({ ok: true, requests: await storage.listRequests(url.searchParams.get('status')) });
     if (segments[0] === 'api' && (segments[1] === 'requests' || segments[1] === 'bookings') && segments[2] && request.method === 'GET' && !segments[3]) {
