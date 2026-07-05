@@ -12,7 +12,7 @@ let schemaReady = false;
 const cors = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET,POST,OPTIONS',
-  'access-control-allow-headers': 'content-type, authorization',
+  'access-control-allow-headers': 'content-type, authorization, x-demo-key',
   'access-control-max-age': '86400',
 };
 
@@ -36,6 +36,27 @@ const publicSession = (session) => session ? { ...session } : null;
 const newestFirst = (items) => [...items].sort((a, b) => String(b.createdAt || b.updatedAt).localeCompare(String(a.createdAt || a.updatedAt)));
 const TOKEN_DAYS = 30;
 const PBKDF2_ITERATIONS = 100000;
+const DEMO_PASSWORD = 'LiveWalkDemo1!';
+const DEMO_TRAVELER = {
+  role: 'traveler',
+  name: 'Sofia Ramirez',
+  email: 'demo.traveler@livewalk.test',
+  password: DEMO_PASSWORD,
+};
+const DEMO_GUIDE = {
+  role: 'guide',
+  name: 'Yuki Tanaka',
+  email: 'demo.guide@livewalk.test',
+  password: DEMO_PASSWORD,
+};
+const DEMO_REQUEST = {
+  origin: 'Shibuya Station Hachiko Gate',
+  destination: 'Meiji Shrine forest entrance',
+  scheduledTime: '2026-07-10 10:30 AM',
+  duration: '45 min',
+  language: 'English',
+  interests: ['Hidden corners', 'Food stops', 'Photo moments'],
+};
 
 function bytesToBase64(bytes) {
   let binary = '';
@@ -75,6 +96,15 @@ async function verifyPassword(password, salt, expectedHash) {
 function bearerToken(request) {
   const auth = request.headers.get('authorization') || '';
   return auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
+}
+
+function validDemoKey(request, env) {
+  const expected = String(env?.DEMO_ADMIN_KEY || '').trim();
+  return Boolean(expected) && request.headers.get('x-demo-key') === expected;
+}
+
+function productionStorage(env) {
+  return Boolean(env?.HYPERDRIVE?.connectionString);
 }
 
 async function body(request) {
@@ -118,6 +148,21 @@ function makeMessage(sessionId, payload, user) {
 
 function makeGuide(user) {
   const name = displayName(user.name, 'Guide'); return { id: user.id, name, avatar: name.slice(0, 2).toUpperCase() };
+}
+
+async function seedDemo(storage) {
+  await storage.reset();
+  const traveler = await storage.registerUser(DEMO_TRAVELER);
+  await storage.registerUser(DEMO_GUIDE);
+  const request = await storage.createRequest(DEMO_REQUEST, traveler.user);
+  return {
+    accounts: {
+      traveler: { name: DEMO_TRAVELER.name, email: DEMO_TRAVELER.email, password: DEMO_PASSWORD },
+      guide: { name: DEMO_GUIDE.name, email: DEMO_GUIDE.email, password: DEMO_PASSWORD },
+    },
+    request,
+    seededAt: now(),
+  };
 }
 
 function canReadRequest(user, request) {
@@ -350,7 +395,18 @@ async function handle(request, env = {}) {
     if (path === '/api/auth/login' && request.method === 'POST') { try { const result = await storage.loginUser(await body(request)); return json({ ok: true, ...result }); } catch (e) { return unauth(e.message); } }
     if (path === '/api/auth/me' && request.method === 'GET') { const { user } = await requireUser(request, storage); if (!user) return unauth(); return json({ ok: true, user: publicUser(user) }); }
     if (path === '/api/auth/logout' && request.method === 'POST') { const { token } = await requireUser(request, storage); await storage.logout(token); return json({ ok: true, loggedOut: true }); }
-    if (path === '/api/demo/reset' && request.method === 'POST') { if (env?.HYPERDRIVE?.connectionString && env.ALLOW_DEMO_RESET !== 'true') return json({ ok: false, error: 'Demo reset disabled' }, 403); await storage.reset(); return json({ ok: true, reset: true }); }
+    if (path === '/api/demo/reset' && request.method === 'POST') {
+      const protectedReset = productionStorage(env);
+      if (protectedReset && !validDemoKey(request, env)) return json({ ok: false, error: 'Demo reset disabled' }, 403);
+      const payload = await body(request);
+      if (payload.seed === true) return json({ ok: true, reset: true, demo: await seedDemo(storage) });
+      await storage.reset();
+      return json({ ok: true, reset: true });
+    }
+    if (path === '/api/demo/seed' && request.method === 'POST') {
+      if (productionStorage(env) && !validDemoKey(request, env)) return json({ ok: false, error: 'Demo seed disabled' }, 403);
+      return json({ ok: true, reset: true, demo: await seedDemo(storage) });
+    }
 
     const { user } = await requireUser(request, storage);
     if (!user) return unauth();

@@ -24,6 +24,26 @@ async function call(path, options = {}, token = '') {
   return { response, body };
 }
 
+async function raw(path, options = {}, env = {}) {
+  const response = await app.fetch(new Request(`https://local.test${path}`, {
+    ...options,
+    headers: { 'content-type': 'application/json', ...(options.headers || {}) },
+  }), env);
+  return { response, body: await response.json() };
+}
+
+const deniedProdReset = await raw('/api/demo/reset', { method: 'POST' }, { HYPERDRIVE: { connectionString: 'postgres://demo.test/livewalk' }, DEMO_ADMIN_KEY: 'demo-key' });
+assert.equal(deniedProdReset.response.status, 403);
+assert.equal(deniedProdReset.body.ok, false);
+
+const seeded = await raw('/api/demo/seed', { method: 'POST', headers: { 'x-demo-key': 'demo-key' } }, { DEMO_ADMIN_KEY: 'demo-key' });
+assert.equal(seeded.response.status, 200);
+assert.equal(seeded.body.ok, true);
+assert.equal(seeded.body.demo.accounts.traveler.email, 'demo.traveler@livewalk.test');
+assert.equal(seeded.body.demo.accounts.guide.email, 'demo.guide@livewalk.test');
+assert.equal(seeded.body.demo.request.status, 'pending');
+assert.equal(seeded.body.demo.request.travelerName, 'Sofia Ramirez');
+
 await call('/api/demo/reset', { method: 'POST' });
 const travelerAuth = await call('/api/auth/register', { method: 'POST', body: JSON.stringify({ role: 'traveler', name: 'Sofia R.', email: 'sofia@example.test', password: 'secret123' }) });
 const guideAuth = await call('/api/auth/register', { method: 'POST', body: JSON.stringify({ role: 'guide', name: 'Yuki Tanaka', email: 'yuki@example.test', password: 'secret123' }) });
