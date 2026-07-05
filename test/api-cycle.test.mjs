@@ -36,7 +36,7 @@ const guideToken = guideAuth.body.token;
 const created = await call('/api/requests', {
   method: 'POST',
   body: JSON.stringify({
-    travelerName: 'Sofia R.',
+    travelerName: 'Spoofed Payload Name',
     origin: 'Shibuya Station, Tokyo',
     destination: 'Meiji Shrine forest entrance',
     scheduledTime: 'Tomorrow, 10:30 AM',
@@ -47,13 +47,16 @@ const created = await call('/api/requests', {
 }, travelerToken);
 assert.equal(created.response.status, 201);
 const requestId = created.body.request.id;
+assert.equal(created.body.request.travelerName, 'Sofia R.');
 
 const pending = await call('/api/requests?status=pending', {}, guideToken);
 assert.equal(pending.body.requests.length, 1);
 assert.equal(pending.body.requests[0].id, requestId);
+assert.equal(pending.body.requests[0].travelerName, 'Sofia R.');
 
 const accepted = await call(`/api/requests/${requestId}/accept`, { method: 'POST' }, guideToken);
 assert.equal(accepted.body.request.status, 'accepted');
+assert.equal(accepted.body.request.travelerName, 'Sofia R.');
 assert.ok(accepted.body.request.sessionId);
 
 const travelerView = await call(`/api/requests/${requestId}`, {}, travelerToken);
@@ -64,9 +67,10 @@ const sessionId = travelerView.body.request.sessionId;
 const started = await call(`/api/sessions/${sessionId}/start`, { method: 'POST' }, guideToken);
 assert.equal(started.body.session.status, 'live');
 
-await call(`/api/sessions/${sessionId}/messages`, { method: 'POST', body: JSON.stringify({ text: 'Please slow down near the market.' }) }, travelerToken);
+await call(`/api/sessions/${sessionId}/messages`, { method: 'POST', body: JSON.stringify({ senderName: 'Spoofed Sender', text: 'Please slow down near the market.' }) }, travelerToken);
 const messages = await call(`/api/sessions/${sessionId}/messages`, {}, guideToken);
 assert.ok(messages.body.messages.some((message) => message.text.includes('slow down')));
 assert.ok(messages.body.messages.some((message) => message.senderRole === 'traveler'));
+assert.ok(messages.body.messages.some((message) => message.senderRole === 'traveler' && message.senderName === 'Sofia R.'));
 
 console.log('Auth API cycle verified:', { requestId, sessionId });
