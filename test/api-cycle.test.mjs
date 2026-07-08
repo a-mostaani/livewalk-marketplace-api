@@ -84,6 +84,24 @@ assert.equal(travelerView.body.request.status, 'accepted');
 assert.equal(travelerView.body.request.guide.name, 'Yuki Tanaka');
 
 const sessionId = travelerView.body.request.sessionId;
+const travelerStartAttempt = await app.fetch(new Request(`https://local.test/api/sessions/${sessionId}/start`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${travelerToken}` },
+}));
+const travelerStartBody = await travelerStartAttempt.json();
+assert.equal(travelerStartAttempt.status, 403);
+assert.equal(travelerStartBody.ok, false);
+
+const earlyMessageAttempt = await app.fetch(new Request(`https://local.test/api/sessions/${sessionId}/messages`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${travelerToken}` },
+  body: JSON.stringify({ text: 'Trying to talk too early.' }),
+}));
+const earlyMessageBody = await earlyMessageAttempt.json();
+assert.equal(earlyMessageAttempt.status, 400);
+assert.equal(earlyMessageBody.ok, false);
+assert.match(earlyMessageBody.error, /not started/i);
+
 const started = await call(`/api/sessions/${sessionId}/start`, { method: 'POST' }, guideToken);
 assert.equal(started.body.session.status, 'live');
 
