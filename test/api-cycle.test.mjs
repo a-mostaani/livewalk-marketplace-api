@@ -43,6 +43,12 @@ assert.equal(seeded.body.demo.accounts.traveler.email, 'demo.traveler@livewalk.t
 assert.equal(seeded.body.demo.accounts.guide.email, 'demo.guide@livewalk.test');
 assert.equal(seeded.body.demo.request.status, 'pending');
 assert.equal(seeded.body.demo.request.travelerName, 'Sofia Ramirez');
+assert.deepEqual(seeded.body.demo.request.origin, { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 });
+assert.deepEqual(seeded.body.demo.request.destination, { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 });
+assert.equal(seeded.body.demo.request.scheduledStart, '2026-07-10T01:30:00.000Z');
+assert.equal(seeded.body.demo.request.durationMinutes, 45);
+assert.equal(seeded.body.demo.request.estimate.currency, 'USD');
+assert.equal(typeof seeded.body.demo.request.estimate.total, 'number');
 
 await call('/api/demo/reset', { method: 'POST' });
 const travelerAuth = await call('/api/auth/register', { method: 'POST', body: JSON.stringify({ role: 'traveler', name: 'Sofia R.', email: 'sofia@example.test', password: 'secret123' }) });
@@ -57,10 +63,10 @@ const created = await call('/api/requests', {
   method: 'POST',
   body: JSON.stringify({
     travelerName: 'Spoofed Payload Name',
-    origin: 'Shibuya Station, Tokyo',
-    destination: 'Meiji Shrine forest entrance',
-    scheduledTime: 'Tomorrow, 10:30 AM',
-    duration: '45 min',
+    origin: { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 },
+    destination: { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 },
+    scheduledStart: '2026-07-10T10:30:00+09:00',
+    durationMinutes: 45,
     language: 'English',
     interests: ['Hidden corners', 'Food stops'],
   }),
@@ -68,6 +74,14 @@ const created = await call('/api/requests', {
 assert.equal(created.response.status, 201);
 const requestId = created.body.request.id;
 assert.equal(created.body.request.travelerName, 'Sofia R.');
+assert.deepEqual(created.body.request.origin, { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 });
+assert.deepEqual(created.body.request.destination, { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 });
+assert.equal(created.body.request.route, 'Shibuya Station Hachiko Gate → Meiji Shrine forest entrance');
+assert.equal(created.body.request.scheduledStart, '2026-07-10T01:30:00.000Z');
+assert.equal(created.body.request.durationMinutes, 45);
+assert.equal(created.body.request.estimate.guideFee, 32);
+assert.equal(created.body.request.estimate.platformFee, 6);
+assert.equal(created.body.request.estimate.total, 38);
 
 const pending = await call('/api/requests?status=pending', {}, guideToken);
 assert.equal(pending.body.requests.length, 1);

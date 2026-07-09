@@ -28,7 +28,7 @@ const now = () => new Date().toISOString();
 const id = (prefix) => `${prefix}_${crypto.randomUUID().slice(0, 10)}`;
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
 const cleanList = (value) => Array.isArray(value) ? value.map(String).filter(Boolean).slice(0, 12) : [];
-const route = (request) => `${request.origin} → ${request.destination}`;
+const route = (request) => `${request.origin?.label || 'Start'} → ${request.destination?.label || 'Destination'}`;
 const publicUser = (user) => user ? { id: user.id, email: user.email, name: user.name, role: user.role, createdAt: user.createdAt } : null;
 const displayName = (value, fallback) => String(value || '').trim() || fallback;
 const publicRequest = (request) => request ? { ...request, travelerName: displayName(request.travelerName, 'Traveler'), route: route(request), travelerId: undefined, guideId: undefined } : null;
@@ -50,10 +50,10 @@ const DEMO_GUIDE = {
   password: DEMO_PASSWORD,
 };
 const DEMO_REQUEST = {
-  origin: 'Shibuya Station Hachiko Gate',
-  destination: 'Meiji Shrine forest entrance',
-  scheduledTime: '2026-07-10 10:30 AM',
-  duration: '45 min',
+  origin: { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 },
+  destination: { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 },
+  scheduledStart: '2026-07-10T10:30:00+09:00',
+  durationMinutes: 45,
   language: 'English',
   interests: ['Hidden corners', 'Food stops', 'Photo moments'],
 };
@@ -112,19 +112,71 @@ async function body(request) {
   try { return await request.json(); } catch { return {}; }
 }
 
+function parsePoint(value, fallback) {
+  if (value && typeof value === 'object') {
+    const label = displayName(value.label || value.name || value.address, fallback.label);
+    const lat = Number(value.lat ?? value.latitude ?? fallback.lat);
+    const lng = Number(value.lng ?? value.longitude ?? fallback.lng);
+    return { label, lat: Number.isFinite(lat) ? lat : fallback.lat, lng: Number.isFinite(lng) ? lng : fallback.lng };
+  }
+  return { ...fallback, label: displayName(value, fallback.label) };
+}
+
+function parseDurationMinutes(payload) {
+  const direct = Number(payload.durationMinutes ?? payload.duration_minutes);
+  if (Number.isFinite(direct) && direct > 0) return Math.round(direct);
+  const legacy = parseInt(String(payload.duration || ''), 10);
+  return Number.isFinite(legacy) && legacy > 0 ? legacy : 45;
+}
+
+function parseScheduledStart(payload) {
+  const value = String(payload.scheduledStart || payload.scheduled_start || payload.scheduledTime || payload.dateTime || '').trim();
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date(Date.now() + 86400000).toISOString();
+}
+
+function distanceKm(origin, destination) {
+  const toRad = (value) => (value * Math.PI) / 180;
+  const earthKm = 6371;
+  const dLat = toRad(destination.lat - origin.lat);
+  const dLng = toRad(destination.lng - origin.lng);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(origin.lat)) * Math.cos(toRad(destination.lat)) * Math.sin(dLng / 2) ** 2;
+  return earthKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function computeEstimate(origin, destination, durationMinutes) {
+  const km = Math.max(0.6, distanceKm(origin, destination));
+  const walkingMinutes = Math.max(8, Math.round((km / 4.6) * 60));
+  const guideFee = Math.max(18, Math.round(durationMinutes * 0.72));
+  const platformFee = Math.round(guideFee * 0.18);
+  return {
+    currency: 'USD',
+    distanceKm: Number(km.toFixed(1)),
+    walkingMinutes,
+    guideFee,
+    platformFee,
+    total: guideFee + platformFee,
+  };
+}
+
 function makeRequest(payload, user) {
   const createdAt = now();
+  const origin = parsePoint(payload.origin ?? payload.start, { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 });
+  const destination = parsePoint(payload.destination, { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 });
+  const durationMinutes = parseDurationMinutes(payload);
+  const scheduledStart = parseScheduledStart(payload);
   return {
     id: id('req'),
     travelerId: user.id,
     guideId: null,
     travelerName: displayName(user.name, 'Traveler'),
-    origin: String(payload.origin || payload.start || 'Shibuya Station, Tokyo'),
-    destination: String(payload.destination || 'Meiji Shrine forest entrance'),
-    scheduledTime: String(payload.scheduledTime || payload.dateTime || 'Tomorrow, 10:30 AM'),
-    duration: String(payload.duration || '45 min'),
+    origin,
+    destination,
+    scheduledStart,
+    durationMinutes,
     language: String(payload.language || 'English'),
     interests: cleanList(payload.interests),
+    estimate: computeEstimate(origin, destination, durationMinutes),
     status: 'pending',
     guide: null,
     sessionId: null,
@@ -285,7 +337,30 @@ function makeMemoryStore() {
 }
 
 function rowToUser(row) { return row ? { id: row.id, email: row.email, role: row.role, name: row.name, passwordSalt: row.password_salt, passwordHash: row.password_hash, createdAt: row.created_at, updatedAt: row.updated_at } : null; }
-function rowToRequest(row) { return row ? { id: row.id, travelerId: row.traveler_id, guideId: row.guide_id, travelerName: displayName(row.traveler_display_name, displayName(row.traveler_name, 'Traveler')), origin: row.origin, destination: row.destination, scheduledTime: row.scheduled_time, duration: row.duration, language: row.language, interests: Array.isArray(row.interests) ? row.interests : [], status: row.status, guide: row.guide || null, sessionId: row.session_id || null, createdAt: row.created_at, updatedAt: row.updated_at } : null; }
+function rowToRequest(row) {
+  if (!row) return null;
+  const origin = parsePoint(row.origin_point || row.origin, { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 });
+  const destination = parsePoint(row.destination_point || row.destination, { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 });
+  const durationMinutes = Number(row.duration_minutes) || parseDurationMinutes({ duration: row.duration });
+  return {
+    id: row.id,
+    travelerId: row.traveler_id,
+    guideId: row.guide_id,
+    travelerName: displayName(row.traveler_display_name, displayName(row.traveler_name, 'Traveler')),
+    origin,
+    destination,
+    scheduledStart: parseScheduledStart({ scheduledStart: row.scheduled_start, scheduledTime: row.scheduled_time }),
+    durationMinutes,
+    language: row.language,
+    interests: Array.isArray(row.interests) ? row.interests : [],
+    estimate: row.estimate || computeEstimate(origin, destination, durationMinutes),
+    status: row.status,
+    guide: row.guide || null,
+    sessionId: row.session_id || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 function rowToSession(row) { return row ? { id: row.id, requestId: row.request_id, status: row.status, startedAt: row.started_at, location: row.location || null, createdAt: row.created_at, updatedAt: row.updated_at } : null; }
 function rowToMessage(row) { return { id: row.id, sessionId: row.session_id, senderRole: row.sender_role, senderName: row.sender_name, text: row.text, createdAt: row.created_at }; }
 
@@ -320,6 +395,11 @@ async function connectDb(env) {
         destination TEXT NOT NULL,
         scheduled_time TEXT NOT NULL,
         duration TEXT NOT NULL,
+        origin_point JSONB,
+        destination_point JSONB,
+        scheduled_start TEXT,
+        duration_minutes INTEGER,
+        estimate JSONB,
         language TEXT NOT NULL,
         interests JSONB NOT NULL DEFAULT '[]'::jsonb,
         status TEXT NOT NULL,
@@ -347,6 +427,11 @@ async function connectDb(env) {
       );
       ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS traveler_id TEXT;
       ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS guide_id TEXT;
+      ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS origin_point JSONB;
+      ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS destination_point JSONB;
+      ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS scheduled_start TEXT;
+      ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS duration_minutes INTEGER;
+      ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS estimate JSONB;
       CREATE INDEX IF NOT EXISTS livewalk_requests_status_created_idx ON livewalk_requests(status, created_at DESC);
       CREATE INDEX IF NOT EXISTS livewalk_messages_session_created_idx ON livewalk_messages(session_id, created_at ASC);
       CREATE INDEX IF NOT EXISTS livewalk_sessions_user_idx ON livewalk_auth_sessions(user_id);
@@ -369,7 +454,7 @@ function makeDbStore(env) {
     async loginUser(payload) { return withDb(env, async (client) => { const result = await client.query('SELECT * FROM livewalk_users WHERE email=$1', [normalizeEmail(payload.email)]); const user = rowToUser(result.rows[0]); if (!user || !(await verifyPassword(String(payload.password || ''), user.passwordSalt, user.passwordHash))) throw new Error('Invalid email or password'); const displayName = String(payload.name || payload.displayName || '').trim(); if (displayName && displayName !== user.name) { const updatedAt = now(); await client.query('UPDATE livewalk_users SET name=$1, updated_at=$2 WHERE id=$3', [displayName, updatedAt, user.id]); user.name = displayName; user.updatedAt = updatedAt; } const token = randomBase64(32); await client.query('INSERT INTO livewalk_auth_sessions (token_hash,user_id,expires_at,created_at) VALUES ($1,$2,$3,$4)', [await sha256(token), user.id, new Date(Date.now() + TOKEN_DAYS * 86400000).toISOString(), now()]); return { user: publicUser(user), token }; }); },
     async userForToken(token) { if (!token) return null; return withDb(env, async (client) => { const result = await client.query('SELECT u.* FROM livewalk_auth_sessions s JOIN livewalk_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>$2', [await sha256(token), now()]); return rowToUser(result.rows[0]); }); },
     async logout(token) { if (!token) return; return withDb(env, async (client) => { await client.query('DELETE FROM livewalk_auth_sessions WHERE token_hash=$1', [await sha256(token)]); }); },
-    async createRequest(payload, user) { const request = makeRequest(payload, user); await withDb(env, async (client) => { await client.query(`INSERT INTO livewalk_requests (id, traveler_id, guide_id, traveler_name, origin, destination, scheduled_time, duration, language, interests, status, guide, session_id, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12::jsonb,$13,$14,$15)`, [request.id, request.travelerId, null, request.travelerName, request.origin, request.destination, request.scheduledTime, request.duration, request.language, JSON.stringify(request.interests), request.status, null, null, request.createdAt, request.updatedAt]); }); return publicRequest(request); },
+    async createRequest(payload, user) { const request = makeRequest(payload, user); await withDb(env, async (client) => { await client.query(`INSERT INTO livewalk_requests (id, traveler_id, guide_id, traveler_name, origin, destination, scheduled_time, duration, origin_point, destination_point, scheduled_start, duration_minutes, estimate, language, interests, status, guide, session_id, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12,$13::jsonb,$14,$15::jsonb,$16,$17::jsonb,$18,$19,$20)`, [request.id, request.travelerId, null, request.travelerName, request.origin.label, request.destination.label, request.scheduledStart, `${request.durationMinutes} min`, JSON.stringify(request.origin), JSON.stringify(request.destination), request.scheduledStart, request.durationMinutes, JSON.stringify(request.estimate), request.language, JSON.stringify(request.interests), request.status, null, null, request.createdAt, request.updatedAt]); }); return publicRequest(request); },
     async listRequests(status, user) { return withDb(env, async (client) => { let result; if (user.role === 'traveler') result = status ? await client.query(requestSelect('WHERE r.traveler_id=$1 AND r.status=$2', 'ORDER BY r.created_at DESC'), [user.id, status]) : await client.query(requestSelect('WHERE r.traveler_id=$1', 'ORDER BY r.created_at DESC'), [user.id]); else result = status ? await client.query(requestSelect('WHERE r.status=$1 AND (r.guide_id IS NULL OR r.guide_id=$2)', 'ORDER BY r.created_at DESC'), [status, user.id]) : await client.query(requestSelect('WHERE r.guide_id IS NULL OR r.guide_id=$1', 'ORDER BY r.created_at DESC'), [user.id]); return result.rows.map(rowToRequest).map(publicRequest); }); },
     async getRequest(requestId, user) { return withDb(env, async (client) => { const req = rowToRequest((await client.query(requestSelect('WHERE r.id=$1'), [requestId])).rows[0]); if (!canReadRequest(user, req)) return null; let session = null; if (req.sessionId) session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1', [req.sessionId])).rows[0]); return { request: publicRequest(req), session: publicSession(session) }; }); },
     async acceptRequest(requestId, user) { if (user.role !== 'guide') return null; return withDb(env, async (client) => { await client.query('BEGIN'); try { const req = rowToRequest((await client.query('SELECT * FROM livewalk_requests WHERE id=$1 FOR UPDATE', [requestId])).rows[0]); if (!req || (req.guideId && req.guideId !== user.id)) { await client.query('ROLLBACK'); return null; } const guide = makeGuide(user); const sessionId = req.sessionId || id('sess'); const updatedAt = now(); await client.query('UPDATE livewalk_requests SET status=$1, guide_id=$2, guide=$3::jsonb, session_id=$4, updated_at=$5 WHERE id=$6', ['accepted', user.id, JSON.stringify(guide), sessionId, updatedAt, requestId]); await client.query(`INSERT INTO livewalk_sessions (id, request_id, status, started_at, location, created_at, updated_at) VALUES ($1,$2,'ready',NULL,NULL,$3,$3) ON CONFLICT (id) DO NOTHING`, [sessionId, requestId, updatedAt]); const msgId = id('msg'); await client.query('INSERT INTO livewalk_messages (id, session_id, sender_role, sender_name, text, created_at) VALUES ($1,$2,$3,$4,$5,$6)', [msgId, sessionId, 'system', 'LiveWalk', `${guide.name} accepted the walk.`, now()]); await client.query('COMMIT'); return this.getRequest(requestId, user); } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; } }); },
