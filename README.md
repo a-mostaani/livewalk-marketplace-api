@@ -7,6 +7,7 @@ Small shared marketplace API for the first LiveWalk end-to-end booking cycle. It
 - `GET /api/health` — health/status
 - `POST /api/demo/reset` — clear demo requests/sessions/messages
 - `POST /api/requests` — create a traveler walk request
+- `POST /api/requests/estimate` — calculate a traveler route quote without creating a request
 - `GET /api/requests?status=pending` — list guide-visible pending requests
 - `GET /api/requests/:id` — traveler booking/request state
 - `GET /api/bookings/:id` — booking plus session state

@@ -1,4 +1,4 @@
-import { now, publicUser, validDemoKey, productionStorage, body, seedDemo } from './domain.js';
+import { now, publicUser, validDemoKey, productionStorage, body, seedDemo, computeRequestEstimate } from './domain.js';
 import { store, requireUser } from './store.js';
 
 const cors = {
@@ -67,9 +67,15 @@ async function handleAuthRoutes(request, storage, path) {
 }
 
 async function handleRequestRoutes(request, storage, url, path, segments, user) {
+  if (path === '/api/requests/estimate' && request.method === 'POST') {
+    if (user.role !== 'traveler') return forbidden('Only travelers can estimate requests');
+    try { return json({ ok: true, estimate: computeRequestEstimate(await body(request)) }); }
+    catch (error) { return bad(error.message); }
+  }
   if (path === '/api/requests' && request.method === 'POST') {
     if (user.role !== 'traveler') return forbidden('Only travelers can create requests');
-    return json({ ok: true, request: await storage.createRequest(await body(request), user) }, 201);
+    try { return json({ ok: true, request: await storage.createRequest(await body(request), user) }, 201); }
+    catch (error) { return bad(error.message); }
   }
   if (path === '/api/requests' && request.method === 'GET') {
     return json({ ok: true, requests: await storage.listRequests(url.searchParams.get('status'), user) });

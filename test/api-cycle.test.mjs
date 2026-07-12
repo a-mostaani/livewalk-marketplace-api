@@ -59,6 +59,62 @@ assert.equal(highestPbkdf2Iterations, 100000);
 const travelerToken = travelerLogin.body.token;
 const guideToken = guideAuth.body.token;
 
+const beforeEstimate = await call('/api/requests', {}, travelerToken);
+assert.equal(beforeEstimate.body.requests.length, 0);
+
+const firstQuote = await call('/api/requests/estimate', {
+  method: 'POST',
+  body: JSON.stringify({
+    origin: { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 },
+    destination: { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 },
+    scheduledStart: '2026-07-10T10:30:00+09:00',
+    durationMinutes: 45,
+  }),
+}, travelerToken);
+assert.equal(firstQuote.response.status, 200);
+assert.equal(firstQuote.body.estimate.total, 38);
+assert.equal(firstQuote.body.estimate.distanceKm, 1.9);
+
+const secondQuote = await call('/api/requests/estimate', {
+  method: 'POST',
+  body: JSON.stringify({
+    origin: { label: 'Tokyo Station', lat: 35.6812, lng: 139.7671 },
+    destination: { label: 'Senso-ji Temple', lat: 35.7148, lng: 139.7967 },
+    scheduledStart: '2026-07-10T10:30:00+09:00',
+    durationMinutes: 45,
+  }),
+}, travelerToken);
+assert.ok(secondQuote.body.estimate.distanceKm > firstQuote.body.estimate.distanceKm);
+assert.ok(secondQuote.body.estimate.walkingMinutes > firstQuote.body.estimate.walkingMinutes);
+
+const afterEstimate = await call('/api/requests', {}, travelerToken);
+assert.equal(afterEstimate.body.requests.length, 0);
+
+const invalidQuote = await app.fetch(new Request('https://local.test/api/requests/estimate', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${travelerToken}` },
+  body: JSON.stringify({
+    origin: { label: 'No coordinates' },
+    destination: { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 },
+    durationMinutes: 45,
+  }),
+}));
+const invalidQuoteBody = await invalidQuote.json();
+assert.equal(invalidQuote.status, 400);
+assert.equal(invalidQuoteBody.ok, false);
+assert.match(invalidQuoteBody.error, /numeric latitude/i);
+
+const guideEstimateAttempt = await app.fetch(new Request('https://local.test/api/requests/estimate', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${guideToken}` },
+  body: JSON.stringify({
+    origin: { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 },
+    destination: { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 },
+    durationMinutes: 45,
+  }),
+}));
+assert.equal(guideEstimateAttempt.status, 403);
+
 const created = await call('/api/requests', {
   method: 'POST',
   body: JSON.stringify({

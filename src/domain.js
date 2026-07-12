@@ -109,6 +109,27 @@ function parseScheduledStart(payload) {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date(Date.now() + 86400000).toISOString();
 }
 
+function requiredPoint(value, field) {
+  if (!value || typeof value !== 'object') throw new Error(`${field} with a label and numeric coordinates is required`);
+  const label = displayName(value.label || value.name || value.address, '');
+  const lat = Number(value.lat ?? value.latitude);
+  const lng = Number(value.lng ?? value.longitude);
+  if (!label) throw new Error(`${field} label is required`);
+  if (!Number.isFinite(lat) || lat < -90 || lat > 90 || !Number.isFinite(lng) || lng < -180 || lng > 180) {
+    throw new Error(`${field} must include valid numeric latitude and longitude`);
+  }
+  return { label, lat, lng };
+}
+
+function structuredRequestInput(payload = {}) {
+  return {
+    origin: requiredPoint(payload.origin ?? payload.start, 'Origin'),
+    destination: requiredPoint(payload.destination, 'Destination'),
+    scheduledStart: parseScheduledStart(payload),
+    durationMinutes: parseDurationMinutes(payload),
+  };
+}
+
 function distanceKm(origin, destination) {
   const toRad = (value) => (value * Math.PI) / 180;
   const earthKm = 6371;
@@ -133,12 +154,14 @@ function computeEstimate(origin, destination, durationMinutes) {
   };
 }
 
+function computeRequestEstimate(payload) {
+  const { origin, destination, durationMinutes } = structuredRequestInput(payload);
+  return computeEstimate(origin, destination, durationMinutes);
+}
+
 function makeRequest(payload, user) {
   const createdAt = now();
-  const origin = parsePoint(payload.origin ?? payload.start, { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 });
-  const destination = parsePoint(payload.destination, { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 });
-  const durationMinutes = parseDurationMinutes(payload);
-  const scheduledStart = parseScheduledStart(payload);
+  const { origin, destination, durationMinutes, scheduledStart } = structuredRequestInput(payload);
   return {
     id: id('req'),
     travelerId: user.id,
@@ -232,8 +255,11 @@ export {
   parsePoint,
   parseDurationMinutes,
   parseScheduledStart,
+  requiredPoint,
+  structuredRequestInput,
   distanceKm,
   computeEstimate,
+  computeRequestEstimate,
   makeRequest,
   makeMessage,
   makeGuide,
