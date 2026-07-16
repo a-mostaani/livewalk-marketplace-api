@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "check": "node --check src/index.js",
-    "test": "node test/api-cycle.test.mjs"
+    "test": "node test/api-cycle.test.mjs && node test/city-scoping.test.mjs"
   },
   "dependencies": {
     "pg": "^8.22.0"

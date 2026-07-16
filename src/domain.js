@@ -3,7 +3,21 @@ const id = (prefix) => `${prefix}_${crypto.randomUUID().replaceAll('-', '')}`;
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
 const cleanList = (value) => Array.isArray(value) ? value.map(String).filter(Boolean).slice(0, 12) : [];
 const route = (request) => `${request.origin?.label || 'Start'} → ${request.destination?.label || 'Destination'}`;
-const publicUser = (user) => user ? { id: user.id, email: user.email, name: user.name, role: user.role, createdAt: user.createdAt } : null;
+const normalizeCity = (value) => {
+  const city = String(value || '').trim().toLowerCase();
+  if (city === 'london') return 'London';
+  if (city === 'toronto') return 'Toronto';
+  return 'other';
+};
+const cityForPoint = (point) => {
+  const lat = Number(point?.lat);
+  const lng = Number(point?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return 'other';
+  if (lat >= 51.28 && lat <= 51.7 && lng >= -0.55 && lng <= 0.33) return 'London';
+  if (lat >= 43.55 && lat <= 43.85 && lng >= -79.65 && lng <= -79.1) return 'Toronto';
+  return 'other';
+};
+const publicUser = (user) => user ? { id: user.id, email: user.email, name: user.name, role: user.role, city: normalizeCity(user.city), createdAt: user.createdAt } : null;
 const displayName = (value, fallback) => String(value || '').trim() || fallback;
 const publicRequest = (request) => request ? { ...request, travelerName: displayName(request.travelerName, 'Traveler'), route: route(request), travelerId: undefined, guideId: undefined } : null;
 const publicSession = (session) => session ? { ...session } : null;
@@ -173,6 +187,7 @@ function makeRequest(payload, user) {
     travelerId: user.id,
     guideId: null,
     travelerName: displayName(user.name, 'Traveler'),
+    city: cityForPoint(origin),
     origin,
     destination,
     scheduledStart,
@@ -224,7 +239,7 @@ async function seedDemo(storage, password) {
 function canReadRequest(user, request) {
   if (!user || !request) return false;
   if (user.role === 'traveler') return request.travelerId === user.id;
-  if (user.role === 'guide') return !request.guideId || request.guideId === user.id;
+  if (user.role === 'guide') return request.guideId === user.id || (!request.guideId && normalizeCity(request.city) === normalizeCity(user.city));
   return false;
 }
 
@@ -243,6 +258,8 @@ export {
   normalizeEmail,
   cleanList,
   route,
+  normalizeCity,
+  cityForPoint,
   publicUser,
   displayName,
   publicRequest,
