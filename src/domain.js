@@ -20,6 +20,17 @@ const cityForPoint = (point) => {
 const publicUser = (user) => user ? { id: user.id, email: user.email, name: user.name, role: user.role, city: normalizeCity(user.city), createdAt: user.createdAt } : null;
 const displayName = (value, fallback) => String(value || '').trim() || fallback;
 const publicRequest = (request) => request ? { ...request, travelerName: displayName(request.travelerName, 'Traveler'), route: route(request), travelerId: undefined, guideId: undefined } : null;
+const coarsePoint = (point) => point ? { ...point, lat: Number(Number(point.lat).toFixed(2)), lng: Number(Number(point.lng).toFixed(2)) } : point;
+const coarseTravelerName = (value) => {
+  const parts = displayName(value, 'Traveler').split(/\s+/);
+  const initial = Array.from(parts.slice(1).join('')).find((character) => /[\p{L}\p{N}]/u.test(character));
+  return initial ? `${parts[0]} ${initial.toUpperCase()}.` : parts[0];
+};
+const coarseRequest = (request) => {
+  const response = publicRequest(request);
+  return response ? { ...response, travelerName: coarseTravelerName(response.travelerName), origin: coarsePoint(response.origin), destination: coarsePoint(response.destination) } : null;
+};
+const publicRequestForUser = (request, user) => user?.role === 'guide' && request?.guideId !== user.id ? coarseRequest(request) : publicRequest(request);
 const publicSession = (session) => session ? { ...session } : null;
 const newestFirst = (items) => [...items].sort((a, b) => String(b.createdAt || b.updatedAt).localeCompare(String(a.createdAt || a.updatedAt)));
 const TOKEN_DAYS = 30;
@@ -263,6 +274,8 @@ export {
   publicUser,
   displayName,
   publicRequest,
+  coarseRequest,
+  publicRequestForUser,
   publicSession,
   newestFirst,
   bytesToBase64,
