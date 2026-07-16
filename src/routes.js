@@ -118,6 +118,11 @@ async function handleSessionRoutes(request, storage, segments, user) {
     if (!started) return notFound('Session not found');
     return json({ ok: true, session: started.session, messages: started.messages });
   }
+  if (segments[3] === 'end' && request.method === 'POST') {
+    const ended = await storage.endSession(sessionId, user);
+    if (!ended) return notFound('Session not found');
+    return json({ ok: true, session: ended.session, messages: ended.messages });
+  }
   if (segments[3] === 'status' && request.method === 'GET') {
     const session = await storage.getSession(sessionId, user);
     if (!session) return notFound('Session not found');

@@ -230,6 +230,20 @@ assert.ok(messages.body.messages.some((message) => message.text.includes('slow d
 assert.ok(messages.body.messages.some((message) => message.senderRole === 'traveler'));
 assert.ok(messages.body.messages.some((message) => message.senderRole === 'traveler' && message.senderName === 'Sofia R.'));
 
+const ended = await call(`/api/sessions/${sessionId}/end`, { method: 'POST' }, guideToken);
+assert.equal(ended.body.session.status, 'ended');
+assert.ok(ended.body.session.endedAt);
+assert.ok(ended.body.messages.some((message) => message.senderRole === 'system' && message.text === 'The live walk session ended.'));
+const endedRequest = await call(`/api/requests/${requestId}`, {}, travelerToken);
+assert.equal(endedRequest.body.request.status, 'completed');
+
+const endMessageCount = ended.body.messages.filter((message) => message.text === 'The live walk session ended.').length;
+const endedAgain = await call(`/api/sessions/${sessionId}/end`, { method: 'POST' }, travelerToken);
+assert.equal(endedAgain.response.status, 200);
+assert.equal(endedAgain.body.session.status, 'ended');
+assert.equal(endedAgain.body.session.endedAt, ended.body.session.endedAt);
+assert.equal(endedAgain.body.messages.filter((message) => message.text === 'The live walk session ended.').length, endMessageCount);
+
 const readableLegacyRow = {
   id: 'req_legacy',
   traveler_id: 'usr_legacy',

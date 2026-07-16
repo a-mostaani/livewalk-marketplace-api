@@ -99,6 +99,17 @@ function makeMemoryStore() {
       await this.addMessage(sessionId, { text: 'The live walk session started.' }, { ...user, role: 'system', name: 'LiveWalk' }, true);
       return this.getSession(sessionId, user);
     },
+    async endSession(sessionId, user) {
+      const session = memory.liveSessions.get(sessionId);
+      const request = session ? memory.requests.get(session.requestId) : null;
+      if (!session || !canUseSession(user, request)) return null;
+      if (session.status === 'ended') return this.getSession(sessionId, user);
+      const endedAt = now();
+      session.status = 'ended'; session.endedAt = endedAt; session.updatedAt = endedAt;
+      request.status = 'completed'; request.updatedAt = endedAt;
+      await this.addMessage(sessionId, { text: 'The live walk session ended.' }, { ...user, role: 'system', name: 'LiveWalk' }, true);
+      return this.getSession(sessionId, user);
+    },
     async addMessage(sessionId, payload, user, system = false) {
       const session = memory.liveSessions.get(sessionId);
       const request = session ? memory.requests.get(session.requestId) : null;
@@ -144,7 +155,7 @@ function rowToRequest(row) {
     updatedAt: row.updated_at,
   };
 }
-function rowToSession(row) { return row ? { id: row.id, requestId: row.request_id, status: row.status, startedAt: row.started_at, location: row.location || null, createdAt: row.created_at, updatedAt: row.updated_at } : null; }
+function rowToSession(row) { return row ? { id: row.id, requestId: row.request_id, status: row.status, startedAt: row.started_at, endedAt: row.ended_at || null, location: row.location || null, createdAt: row.created_at, updatedAt: row.updated_at } : null; }
 function rowToMessage(row) { return { id: row.id, sessionId: row.session_id, senderRole: row.sender_role, senderName: row.sender_name, text: row.text, createdAt: row.created_at }; }
 
 async function connectDb(env) {
@@ -196,6 +207,7 @@ async function connectDb(env) {
         request_id TEXT NOT NULL REFERENCES livewalk_requests(id) ON DELETE CASCADE,
         status TEXT NOT NULL,
         started_at TEXT,
+        ended_at TEXT,
         location JSONB,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -215,6 +227,7 @@ async function connectDb(env) {
       ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS scheduled_start TEXT;
       ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS duration_minutes INTEGER;
       ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS estimate JSONB;
+      ALTER TABLE livewalk_sessions ADD COLUMN IF NOT EXISTS ended_at TEXT;
       CREATE INDEX IF NOT EXISTS livewalk_requests_status_created_idx ON livewalk_requests(status, created_at DESC);
       CREATE INDEX IF NOT EXISTS livewalk_messages_session_created_idx ON livewalk_messages(session_id, created_at ASC);
       CREATE INDEX IF NOT EXISTS livewalk_sessions_user_idx ON livewalk_auth_sessions(user_id);
@@ -244,6 +257,7 @@ function makeDbStore(env) {
     async declineRequest(requestId, user) { if (user.role !== 'guide') return null; return withDb(env, async (client) => { const guide = makeGuide(user); await client.query('UPDATE livewalk_requests SET status=$1, guide_id=$2, guide=$3::jsonb, updated_at=$4 WHERE id=$5', ['declined', user.id, JSON.stringify(guide), now(), requestId]); const result = await client.query(requestSelect('WHERE r.id=$1'), [requestId]); return publicRequest(rowToRequest(result.rows[0])); }); },
     async getSession(sessionId, user) { return withDb(env, async (client) => { const session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1', [sessionId])).rows[0]); const req = session ? rowToRequest((await client.query(requestSelect('WHERE r.id=$1'), [session.requestId])).rows[0]) : null; if (!session || !canUseSession(user, req)) return null; const messages = await client.query('SELECT * FROM livewalk_messages WHERE session_id=$1 ORDER BY created_at ASC', [sessionId]); return { session: publicSession(session), messages: messages.rows.map(rowToMessage) }; }); },
     async startSession(sessionId, user) { return withDb(env, async (client) => { const session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1', [sessionId])).rows[0]); const req = session ? rowToRequest((await client.query(requestSelect('WHERE r.id=$1'), [session.requestId])).rows[0]) : null; if (!session || !canUseSession(user, req) || user.role !== 'guide' || req.guideId !== user.id) return null; const updatedAt = now(); await client.query('UPDATE livewalk_sessions SET status=$1, started_at=COALESCE(started_at,$2), updated_at=$2 WHERE id=$3', ['live', updatedAt, sessionId]); await client.query('UPDATE livewalk_requests SET status=$1, updated_at=$2 WHERE id=$3', ['live', updatedAt, session.requestId]); await client.query('INSERT INTO livewalk_messages (id, session_id, sender_role, sender_name, text, created_at) VALUES ($1,$2,$3,$4,$5,$6)', [id('msg'), sessionId, 'system', 'LiveWalk', 'The live walk session started.', now()]); return this.getSession(sessionId, user); }); },
+    async endSession(sessionId, user) { return withDb(env, async (client) => { await client.query('BEGIN'); try { const session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1 FOR UPDATE', [sessionId])).rows[0]); const req = session ? rowToRequest((await client.query(requestSelect('WHERE r.id=$1 FOR UPDATE'), [session.requestId])).rows[0]) : null; if (!session || !canUseSession(user, req)) { await client.query('ROLLBACK'); return null; } if (session.status === 'ended') { await client.query('COMMIT'); return this.getSession(sessionId, user); } const endedAt = now(); await client.query('UPDATE livewalk_sessions SET status=$1, ended_at=COALESCE(ended_at,$2), updated_at=$2 WHERE id=$3', ['ended', endedAt, sessionId]); await client.query('UPDATE livewalk_requests SET status=$1, updated_at=$2 WHERE id=$3', ['completed', endedAt, session.requestId]); await client.query('INSERT INTO livewalk_messages (id, session_id, sender_role, sender_name, text, created_at) VALUES ($1,$2,$3,$4,$5,$6)', [id('msg'), sessionId, 'system', 'LiveWalk', 'The live walk session ended.', endedAt]); await client.query('COMMIT'); return this.getSession(sessionId, user); } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; } }); },
     async addMessage(sessionId, payload, user) { return withDb(env, async (client) => { const session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1', [sessionId])).rows[0]); const req = session ? rowToRequest((await client.query(requestSelect('WHERE r.id=$1'), [session.requestId])).rows[0]) : null; if (!session || !canUseSession(user, req)) return null; if (session.status !== 'live') throw new Error('Live session has not started yet'); const message = makeMessage(sessionId, payload, user); await client.query('INSERT INTO livewalk_messages (id, session_id, sender_role, sender_name, text, created_at) VALUES ($1,$2,$3,$4,$5,$6)', [message.id, message.sessionId, message.senderRole, message.senderName, message.text, message.createdAt]); return message; }); },
     async setLocation(sessionId, payload, user) { return withDb(env, async (client) => { const session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1', [sessionId])).rows[0]); const req = session ? rowToRequest((await client.query(requestSelect('WHERE r.id=$1'), [session.requestId])).rows[0]) : null; if (!session || !canUseSession(user, req) || user.role !== 'guide') return null; if (session.status !== 'live') throw new Error('Live session has not started yet'); const location = sessionLocation(payload); const result = await client.query('UPDATE livewalk_sessions SET location=$1::jsonb, updated_at=$2 WHERE id=$3 RETURNING *', [JSON.stringify(location), now(), sessionId]); return publicSession(rowToSession(result.rows[0])); }); },
   };
