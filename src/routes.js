@@ -15,6 +15,7 @@ const json = (payload, status = 200) => new Response(JSON.stringify(payload), {
 const notFound = (message = 'Not found') => json({ ok: false, error: message }, 404);
 const bad = (message) => json({ ok: false, error: message }, 400);
 const forbidden = (message = 'Not authorized') => json({ ok: false, error: message }, 403);
+const conflict = (message) => json({ ok: false, error: message }, 409);
 const unauth = (message = 'Login required') => json({ ok: false, error: message }, 401);
 
 function parseRoute(request) {
@@ -102,9 +103,14 @@ async function handleRequestRoutes(request, storage, url, path, segments, user) 
     return json({ ok: true, request: accepted.request, session: accepted.session });
   }
   if (segments[0] === 'api' && segments[1] === 'requests' && segments[2] && segments[3] === 'decline' && request.method === 'POST') {
-    const declined = await storage.declineRequest(segments[2], user);
-    if (!declined) return notFound('Request not found');
-    return json({ ok: true, request: declined });
+    try {
+      const declined = await storage.declineRequest(segments[2], user);
+      if (!declined) return notFound('Request not found');
+      return json({ ok: true, request: declined });
+    } catch (error) {
+      if (error?.code === 'REQUEST_NOT_PENDING') return conflict(error.message);
+      throw error;
+    }
   }
   return null;
 }

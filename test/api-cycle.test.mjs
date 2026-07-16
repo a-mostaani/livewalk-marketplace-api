@@ -73,15 +73,19 @@ assert.equal(seededLogin.body.user.email, 'demo.traveler@livewalk.test');
 
 await call('/api/demo/reset', { method: 'POST' });
 const travelerPassword = crypto.randomUUID();
+const declineGuidePassword = crypto.randomUUID();
 const guidePassword = crypto.randomUUID();
 const travelerAuth = await call('/api/auth/register', { method: 'POST', body: JSON.stringify({ role: 'traveler', name: 'Sofia R.', email: 'sofia@example.test', password: travelerPassword }) });
+const declineGuideAuth = await call('/api/auth/register', { method: 'POST', body: JSON.stringify({ role: 'guide', name: 'Guide A', email: 'guide.a@example.test', password: declineGuidePassword }) });
 const guideAuth = await call('/api/auth/register', { method: 'POST', body: JSON.stringify({ role: 'guide', name: 'Yuki Tanaka', email: 'yuki@example.test', password: guidePassword }) });
 const travelerLogin = await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'sofia@example.test', password: travelerPassword }) });
 assert.equal(travelerLogin.body.user.id, travelerAuth.body.user.id);
 assert.equal(highestPbkdf2Iterations, 100000);
 assert.match(travelerAuth.body.user.id, /^usr_[0-9a-f]{32}$/);
+assert.match(declineGuideAuth.body.user.id, /^usr_[0-9a-f]{32}$/);
 assert.match(guideAuth.body.user.id, /^usr_[0-9a-f]{32}$/);
 const travelerToken = travelerLogin.body.token;
+const declineGuideToken = declineGuideAuth.body.token;
 const guideToken = guideAuth.body.token;
 
 const beforeEstimate = await call('/api/requests', {}, travelerToken);
@@ -165,6 +169,20 @@ assert.equal(created.body.request.estimate.guideFee, 32);
 assert.equal(created.body.request.estimate.platformFee, 6);
 assert.equal(created.body.request.estimate.total, 38);
 
+const pendingForDecliningGuide = await call('/api/requests?status=pending', {}, declineGuideToken);
+assert.equal(pendingForDecliningGuide.body.requests.length, 1);
+assert.equal(pendingForDecliningGuide.body.requests[0].id, requestId);
+
+const declined = await call(`/api/requests/${requestId}/decline`, { method: 'POST' }, declineGuideToken);
+assert.equal(declined.response.status, 200);
+assert.equal(declined.body.request.status, 'pending');
+assert.equal(declined.body.request.guide, null);
+assert.equal(globalThis.__LIVEWALK_STATE__.requests.get(requestId).guideId, null);
+assert.equal(globalThis.__LIVEWALK_STATE__.requests.get(requestId).status, 'pending');
+
+const hiddenFromDecliningGuide = await call('/api/requests?status=pending', {}, declineGuideToken);
+assert.equal(hiddenFromDecliningGuide.body.requests.length, 0);
+
 const pending = await call('/api/requests?status=pending', {}, guideToken);
 assert.equal(pending.body.requests.length, 1);
 assert.equal(pending.body.requests[0].id, requestId);
@@ -175,9 +193,19 @@ assert.equal(accepted.body.request.status, 'accepted');
 assert.equal(accepted.body.request.travelerName, 'Sofia R.');
 assert.ok(accepted.body.request.sessionId);
 
+const declinedAccepted = await app.fetch(new Request(`https://local.test/api/requests/${requestId}/decline`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${declineGuideToken}` },
+}));
+const declinedAcceptedBody = await declinedAccepted.json();
+assert.equal(declinedAccepted.status, 409);
+assert.equal(declinedAcceptedBody.ok, false);
+assert.match(declinedAcceptedBody.error, /only pending/i);
+
 const travelerView = await call(`/api/requests/${requestId}`, {}, travelerToken);
 assert.equal(travelerView.body.request.status, 'accepted');
 assert.equal(travelerView.body.request.guide.name, 'Yuki Tanaka');
+assert.equal(travelerView.body.request.sessionId, accepted.body.request.sessionId);
 
 const sessionId = travelerView.body.request.sessionId;
 assert.match(sessionId, /^sess_[0-9a-f]{32}$/);

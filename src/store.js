@@ -5,11 +5,15 @@ const memory = globalThis.__LIVEWALK_STATE__ ??= {
   liveSessions: new Map(),
   messages: new Map(),
 };
+memory.declines ??= new Set();
 
 let PgClient;
 let schemaReady = false;
 
 import { TOKEN_DAYS, now, id, normalizeEmail, publicUser, displayName, publicRequest, publicSession, newestFirst, randomBase64, sha256, hashPassword, verifyPassword, bearerToken, parsePoint, parseDurationMinutes, parseScheduledStart, computeEstimate, makeRequest, makeMessage, makeGuide, canReadRequest, canUseSession, sessionLocation } from './domain.js';
+
+const declineKey = (requestId, guideId) => `${requestId}:${guideId}`;
+function declineConflict() { const error = new Error('Only pending requests can be declined'); error.code = 'REQUEST_NOT_PENDING'; return error; }
 
 function makeMemoryStore() {
   async function createAuthSession(user) {
@@ -22,7 +26,7 @@ function makeMemoryStore() {
 
   return {
     async health() { return { backend: 'edge-memory-demo', users: memory.users.size, requests: memory.requests.size, sessions: memory.liveSessions.size }; },
-    async reset() { memory.users.clear(); memory.sessionsByTokenHash.clear(); memory.requests.clear(); memory.liveSessions.clear(); memory.messages.clear(); },
+    async reset() { memory.users.clear(); memory.sessionsByTokenHash.clear(); memory.requests.clear(); memory.liveSessions.clear(); memory.messages.clear(); memory.declines.clear(); },
     async registerUser(payload) {
       const email = normalizeEmail(payload.email);
       const password = String(payload.password || '');
@@ -59,7 +63,7 @@ function makeMemoryStore() {
       const rows = [...memory.requests.values()].filter((item) => {
         if (status && item.status !== status) return false;
         if (user.role === 'traveler') return item.travelerId === user.id;
-        if (user.role === 'guide') return !item.guideId || item.guideId === user.id;
+        if (user.role === 'guide') return (!item.guideId || item.guideId === user.id) && !memory.declines.has(declineKey(item.id, user.id));
         return false;
       });
       return newestFirst(rows).map(publicRequest);
@@ -81,7 +85,8 @@ function makeMemoryStore() {
     async declineRequest(requestId, user) {
       const request = memory.requests.get(requestId);
       if (!request || user.role !== 'guide') return null;
-      request.status = 'declined'; request.guideId = user.id; request.guide = makeGuide(user); request.updatedAt = now();
+      if (request.status !== 'pending' || request.guideId) throw declineConflict();
+      memory.declines.add(declineKey(requestId, user.id));
       return publicRequest(request);
     },
     async getSession(sessionId, user) {
@@ -220,6 +225,12 @@ async function connectDb(env) {
         text TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS livewalk_declines (
+        request_id TEXT NOT NULL REFERENCES livewalk_requests(id) ON DELETE CASCADE,
+        guide_id TEXT NOT NULL REFERENCES livewalk_users(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (request_id, guide_id)
+      );
       ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS traveler_id TEXT;
       ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS guide_id TEXT;
       ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS origin_point JSONB;
@@ -229,6 +240,7 @@ async function connectDb(env) {
       ALTER TABLE livewalk_requests ADD COLUMN IF NOT EXISTS estimate JSONB;
       ALTER TABLE livewalk_sessions ADD COLUMN IF NOT EXISTS ended_at TEXT;
       CREATE INDEX IF NOT EXISTS livewalk_requests_status_created_idx ON livewalk_requests(status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS livewalk_declines_guide_request_idx ON livewalk_declines(guide_id, request_id);
       CREATE INDEX IF NOT EXISTS livewalk_messages_session_created_idx ON livewalk_messages(session_id, created_at ASC);
       CREATE INDEX IF NOT EXISTS livewalk_sessions_user_idx ON livewalk_auth_sessions(user_id);
     `);
@@ -245,16 +257,16 @@ function requestSelect(whereClause = '', orderClause = '') {
 function makeDbStore(env) {
   return {
     async health() { return withDb(env, async (client) => { const users = await client.query('SELECT COUNT(*)::int AS count FROM livewalk_users'); const requests = await client.query('SELECT COUNT(*)::int AS count FROM livewalk_requests'); const sessions = await client.query('SELECT COUNT(*)::int AS count FROM livewalk_sessions'); return { backend: 'postgres-auth-demo', users: users.rows[0].count, requests: requests.rows[0].count, sessions: sessions.rows[0].count }; }); },
-    async reset() { return withDb(env, async (client) => { await client.query('TRUNCATE livewalk_messages, livewalk_sessions, livewalk_requests, livewalk_auth_sessions, livewalk_users'); }); },
+    async reset() { return withDb(env, async (client) => { await client.query('TRUNCATE livewalk_messages, livewalk_sessions, livewalk_declines, livewalk_requests, livewalk_auth_sessions, livewalk_users'); }); },
     async registerUser(payload) { return withDb(env, async (client) => { const email = normalizeEmail(payload.email); const password = String(payload.password || ''); const role = payload.role === 'guide' ? 'guide' : 'traveler'; const name = String(payload.name || payload.displayName || (role === 'guide' ? 'Yuki Tanaka' : 'Sofia R.')).trim(); if (!email.includes('@')) throw new Error('Valid email is required'); if (password.length < 6) throw new Error('Password must be at least 6 characters'); const { salt, hash } = await hashPassword(password); const user = { id: id('usr'), email, role, name, passwordSalt: salt, passwordHash: hash, createdAt: now(), updatedAt: now() }; try { await client.query('INSERT INTO livewalk_users (id,email,role,name,password_salt,password_hash,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [user.id, user.email, user.role, user.name, user.passwordSalt, user.passwordHash, user.createdAt, user.updatedAt]); } catch (error) { if (String(error.message).includes('duplicate') || error.code === '23505') throw new Error('Email already registered'); throw error; } const token = randomBase64(32); await client.query('INSERT INTO livewalk_auth_sessions (token_hash,user_id,expires_at,created_at) VALUES ($1,$2,$3,$4)', [await sha256(token), user.id, new Date(Date.now() + TOKEN_DAYS * 86400000).toISOString(), now()]); return { user: publicUser(user), token }; }); },
     async loginUser(payload) { return withDb(env, async (client) => { const result = await client.query('SELECT * FROM livewalk_users WHERE email=$1', [normalizeEmail(payload.email)]); const user = rowToUser(result.rows[0]); if (!user || !(await verifyPassword(String(payload.password || ''), user.passwordSalt, user.passwordHash))) throw new Error('Invalid email or password'); const displayName = String(payload.name || payload.displayName || '').trim(); if (displayName && displayName !== user.name) { const updatedAt = now(); await client.query('UPDATE livewalk_users SET name=$1, updated_at=$2 WHERE id=$3', [displayName, updatedAt, user.id]); user.name = displayName; user.updatedAt = updatedAt; } const token = randomBase64(32); await client.query('INSERT INTO livewalk_auth_sessions (token_hash,user_id,expires_at,created_at) VALUES ($1,$2,$3,$4)', [await sha256(token), user.id, new Date(Date.now() + TOKEN_DAYS * 86400000).toISOString(), now()]); return { user: publicUser(user), token }; }); },
     async userForToken(token) { if (!token) return null; return withDb(env, async (client) => { const result = await client.query('SELECT u.* FROM livewalk_auth_sessions s JOIN livewalk_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>$2', [await sha256(token), now()]); return rowToUser(result.rows[0]); }); },
     async logout(token) { if (!token) return; return withDb(env, async (client) => { await client.query('DELETE FROM livewalk_auth_sessions WHERE token_hash=$1', [await sha256(token)]); }); },
     async createRequest(payload, user) { const request = makeRequest(payload, user); await withDb(env, async (client) => { await client.query(`INSERT INTO livewalk_requests (id, traveler_id, guide_id, traveler_name, origin, destination, scheduled_time, duration, origin_point, destination_point, scheduled_start, duration_minutes, estimate, language, interests, status, guide, session_id, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12,$13::jsonb,$14,$15::jsonb,$16,$17::jsonb,$18,$19,$20)`, [request.id, request.travelerId, null, request.travelerName, request.origin.label, request.destination.label, request.scheduledStart, `${request.durationMinutes} min`, JSON.stringify(request.origin), JSON.stringify(request.destination), request.scheduledStart, request.durationMinutes, JSON.stringify(request.estimate), request.language, JSON.stringify(request.interests), request.status, null, null, request.createdAt, request.updatedAt]); }); return publicRequest(request); },
-    async listRequests(status, user) { return withDb(env, async (client) => { let result; if (user.role === 'traveler') result = status ? await client.query(requestSelect('WHERE r.traveler_id=$1 AND r.status=$2', 'ORDER BY r.created_at DESC'), [user.id, status]) : await client.query(requestSelect('WHERE r.traveler_id=$1', 'ORDER BY r.created_at DESC'), [user.id]); else result = status ? await client.query(requestSelect('WHERE r.status=$1 AND (r.guide_id IS NULL OR r.guide_id=$2)', 'ORDER BY r.created_at DESC'), [status, user.id]) : await client.query(requestSelect('WHERE r.guide_id IS NULL OR r.guide_id=$1', 'ORDER BY r.created_at DESC'), [user.id]); return result.rows.map(rowToRequest).filter(Boolean).map(publicRequest); }); },
+    async listRequests(status, user) { return withDb(env, async (client) => { let result; if (user.role === 'traveler') result = status ? await client.query(requestSelect('WHERE r.traveler_id=$1 AND r.status=$2', 'ORDER BY r.created_at DESC'), [user.id, status]) : await client.query(requestSelect('WHERE r.traveler_id=$1', 'ORDER BY r.created_at DESC'), [user.id]); else result = status ? await client.query(requestSelect('WHERE r.status=$1 AND (r.guide_id IS NULL OR r.guide_id=$2) AND NOT EXISTS (SELECT 1 FROM livewalk_declines d WHERE d.request_id=r.id AND d.guide_id=$2)', 'ORDER BY r.created_at DESC'), [status, user.id]) : await client.query(requestSelect('WHERE (r.guide_id IS NULL OR r.guide_id=$1) AND NOT EXISTS (SELECT 1 FROM livewalk_declines d WHERE d.request_id=r.id AND d.guide_id=$1)', 'ORDER BY r.created_at DESC'), [user.id]); return result.rows.map(rowToRequest).filter(Boolean).map(publicRequest); }); },
     async getRequest(requestId, user) { return withDb(env, async (client) => { const req = rowToRequest((await client.query(requestSelect('WHERE r.id=$1'), [requestId])).rows[0]); if (!canReadRequest(user, req)) return null; let session = null; if (req.sessionId) session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1', [req.sessionId])).rows[0]); return { request: publicRequest(req), session: publicSession(session) }; }); },
     async acceptRequest(requestId, user) { if (user.role !== 'guide') return null; return withDb(env, async (client) => { await client.query('BEGIN'); try { const req = rowToRequest((await client.query('SELECT * FROM livewalk_requests WHERE id=$1 FOR UPDATE', [requestId])).rows[0]); if (!req || (req.guideId && req.guideId !== user.id)) { await client.query('ROLLBACK'); return null; } const guide = makeGuide(user); const sessionId = req.sessionId || id('sess'); const updatedAt = now(); await client.query('UPDATE livewalk_requests SET status=$1, guide_id=$2, guide=$3::jsonb, session_id=$4, updated_at=$5 WHERE id=$6', ['accepted', user.id, JSON.stringify(guide), sessionId, updatedAt, requestId]); await client.query(`INSERT INTO livewalk_sessions (id, request_id, status, started_at, location, created_at, updated_at) VALUES ($1,$2,'ready',NULL,NULL,$3,$3) ON CONFLICT (id) DO NOTHING`, [sessionId, requestId, updatedAt]); const msgId = id('msg'); await client.query('INSERT INTO livewalk_messages (id, session_id, sender_role, sender_name, text, created_at) VALUES ($1,$2,$3,$4,$5,$6)', [msgId, sessionId, 'system', 'LiveWalk', `${guide.name} accepted the walk.`, now()]); await client.query('COMMIT'); return this.getRequest(requestId, user); } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; } }); },
-    async declineRequest(requestId, user) { if (user.role !== 'guide') return null; return withDb(env, async (client) => { const guide = makeGuide(user); await client.query('UPDATE livewalk_requests SET status=$1, guide_id=$2, guide=$3::jsonb, updated_at=$4 WHERE id=$5', ['declined', user.id, JSON.stringify(guide), now(), requestId]); const result = await client.query(requestSelect('WHERE r.id=$1'), [requestId]); return publicRequest(rowToRequest(result.rows[0])); }); },
+    async declineRequest(requestId, user) { if (user.role !== 'guide') return null; return withDb(env, async (client) => { await client.query('BEGIN'); try { const req = rowToRequest((await client.query('SELECT * FROM livewalk_requests WHERE id=$1 FOR UPDATE', [requestId])).rows[0]); if (!req) { await client.query('ROLLBACK'); return null; } if (req.status !== 'pending' || req.guideId) throw declineConflict(); await client.query('INSERT INTO livewalk_declines (request_id, guide_id, created_at) VALUES ($1,$2,$3) ON CONFLICT (request_id, guide_id) DO NOTHING', [requestId, user.id, now()]); await client.query('COMMIT'); return publicRequest(req); } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; } }); },
     async getSession(sessionId, user) { return withDb(env, async (client) => { const session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1', [sessionId])).rows[0]); const req = session ? rowToRequest((await client.query(requestSelect('WHERE r.id=$1'), [session.requestId])).rows[0]) : null; if (!session || !canUseSession(user, req)) return null; const messages = await client.query('SELECT * FROM livewalk_messages WHERE session_id=$1 ORDER BY created_at ASC', [sessionId]); return { session: publicSession(session), messages: messages.rows.map(rowToMessage) }; }); },
     async startSession(sessionId, user) { return withDb(env, async (client) => { const session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1', [sessionId])).rows[0]); const req = session ? rowToRequest((await client.query(requestSelect('WHERE r.id=$1'), [session.requestId])).rows[0]) : null; if (!session || !canUseSession(user, req) || user.role !== 'guide' || req.guideId !== user.id) return null; const updatedAt = now(); await client.query('UPDATE livewalk_sessions SET status=$1, started_at=COALESCE(started_at,$2), updated_at=$2 WHERE id=$3', ['live', updatedAt, sessionId]); await client.query('UPDATE livewalk_requests SET status=$1, updated_at=$2 WHERE id=$3', ['live', updatedAt, session.requestId]); await client.query('INSERT INTO livewalk_messages (id, session_id, sender_role, sender_name, text, created_at) VALUES ($1,$2,$3,$4,$5,$6)', [id('msg'), sessionId, 'system', 'LiveWalk', 'The live walk session started.', now()]); return this.getSession(sessionId, user); }); },
     async endSession(sessionId, user) { return withDb(env, async (client) => { await client.query('BEGIN'); try { const session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1 FOR UPDATE', [sessionId])).rows[0]); const req = session ? rowToRequest((await client.query('SELECT * FROM livewalk_requests WHERE id=$1 FOR UPDATE', [session.requestId])).rows[0]) : null; if (!session || !canUseSession(user, req)) { await client.query('ROLLBACK'); return null; } if (session.status === 'ended') { await client.query('COMMIT'); return this.getSession(sessionId, user); } const endedAt = now(); await client.query('UPDATE livewalk_sessions SET status=$1, ended_at=COALESCE(ended_at,$2), updated_at=$2 WHERE id=$3', ['ended', endedAt, sessionId]); await client.query('UPDATE livewalk_requests SET status=$1, updated_at=$2 WHERE id=$3', ['completed', endedAt, session.requestId]); await client.query('INSERT INTO livewalk_messages (id, session_id, sender_role, sender_name, text, created_at) VALUES ($1,$2,$3,$4,$5,$6)', [id('msg'), sessionId, 'system', 'LiveWalk', 'The live walk session ended.', endedAt]); await client.query('COMMIT'); return this.getSession(sessionId, user); } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; } }); },
