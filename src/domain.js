@@ -1,5 +1,5 @@
 const now = () => new Date().toISOString();
-const id = (prefix) => `${prefix}_${crypto.randomUUID().slice(0, 10)}`;
+const id = (prefix) => `${prefix}_${crypto.randomUUID().replaceAll('-', '')}`;
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
 const cleanList = (value) => Array.isArray(value) ? value.map(String).filter(Boolean).slice(0, 12) : [];
 const route = (request) => `${request.origin?.label || 'Start'} → ${request.destination?.label || 'Destination'}`;
@@ -10,18 +10,15 @@ const publicSession = (session) => session ? { ...session } : null;
 const newestFirst = (items) => [...items].sort((a, b) => String(b.createdAt || b.updatedAt).localeCompare(String(a.createdAt || a.updatedAt)));
 const TOKEN_DAYS = 30;
 const PBKDF2_ITERATIONS = 100000;
-const DEMO_PASSWORD = 'LiveWalkDemo1!';
 const DEMO_TRAVELER = {
   role: 'traveler',
   name: 'Sofia Ramirez',
   email: 'demo.traveler@livewalk.test',
-  password: DEMO_PASSWORD,
 };
 const DEMO_GUIDE = {
   role: 'guide',
   name: 'Yuki Tanaka',
   email: 'demo.guide@livewalk.test',
-  password: DEMO_PASSWORD,
 };
 const DEMO_REQUEST = {
   origin: { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 },
@@ -72,13 +69,13 @@ function bearerToken(request) {
   return auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
 }
 
-function validDemoKey(request, env) {
-  const expected = String(env?.DEMO_ADMIN_KEY || '').trim();
-  return Boolean(expected) && request.headers.get('x-demo-key') === expected;
-}
-
 function productionStorage(env) {
   return Boolean(env?.HYPERDRIVE?.connectionString);
+}
+
+function demoSeedPassword(env) {
+  const password = String(env?.DEMO_SEED_PASSWORD || '').trim();
+  return password || null;
 }
 
 async function body(request) {
@@ -86,14 +83,13 @@ async function body(request) {
   try { return await request.json(); } catch { return {}; }
 }
 
-function parsePoint(value, fallback) {
-  if (value && typeof value === 'object') {
-    const label = displayName(value.label || value.name || value.address, fallback.label);
-    const lat = Number(value.lat ?? value.latitude ?? fallback.lat);
-    const lng = Number(value.lng ?? value.longitude ?? fallback.lng);
-    return { label, lat: Number.isFinite(lat) ? lat : fallback.lat, lng: Number.isFinite(lng) ? lng : fallback.lng };
-  }
-  return { ...fallback, label: displayName(value, fallback.label) };
+function parsePoint(value) {
+  if (!value || typeof value !== 'object') return null;
+  const label = displayName(value.label || value.name || value.address, '');
+  const lat = Number(value.lat ?? value.latitude);
+  const lng = Number(value.lng ?? value.longitude);
+  if (!label || !Number.isFinite(lat) || lat < -90 || lat > 90 || !Number.isFinite(lng) || lng < -180 || lng > 180) return null;
+  return { label, lat, lng };
 }
 
 function parseDurationMinutes(payload) {
@@ -119,6 +115,16 @@ function requiredPoint(value, field) {
     throw new Error(`${field} must include valid numeric latitude and longitude`);
   }
   return { label, lat, lng };
+}
+
+function sessionLocation(payload = {}) {
+  const point = requiredPoint({
+    label: payload.label ?? payload.name ?? payload.address ?? 'Guide location',
+    lat: payload.lat ?? payload.latitude,
+    lng: payload.lng ?? payload.longitude,
+  }, 'Session location');
+  const progress = Number(payload.progress ?? 48);
+  return { ...point, progress: Number.isFinite(progress) ? progress : 48, updatedAt: now() };
 }
 
 function structuredRequestInput(payload = {}) {
@@ -199,15 +205,16 @@ function makeGuide(user) {
   const name = displayName(user.name, 'Guide'); return { id: user.id, name, avatar: name.slice(0, 2).toUpperCase() };
 }
 
-async function seedDemo(storage) {
+async function seedDemo(storage, password) {
+  if (!password) throw new Error('Demo seed password is not configured');
   await storage.reset();
-  const traveler = await storage.registerUser(DEMO_TRAVELER);
-  await storage.registerUser(DEMO_GUIDE);
+  const traveler = await storage.registerUser({ ...DEMO_TRAVELER, password });
+  await storage.registerUser({ ...DEMO_GUIDE, password });
   const request = await storage.createRequest(DEMO_REQUEST, traveler.user);
   return {
     accounts: {
-      traveler: { name: DEMO_TRAVELER.name, email: DEMO_TRAVELER.email, password: DEMO_PASSWORD },
-      guide: { name: DEMO_GUIDE.name, email: DEMO_GUIDE.email, password: DEMO_PASSWORD },
+      traveler: { name: DEMO_TRAVELER.name, email: DEMO_TRAVELER.email },
+      guide: { name: DEMO_GUIDE.name, email: DEMO_GUIDE.email },
     },
     request,
     seededAt: now(),
@@ -228,7 +235,6 @@ function canUseSession(user, request) {
 
 export {
   TOKEN_DAYS,
-  DEMO_PASSWORD,
   DEMO_TRAVELER,
   DEMO_GUIDE,
   DEMO_REQUEST,
@@ -249,13 +255,14 @@ export {
   hashPassword,
   verifyPassword,
   bearerToken,
-  validDemoKey,
   productionStorage,
+  demoSeedPassword,
   body,
   parsePoint,
   parseDurationMinutes,
   parseScheduledStart,
   requiredPoint,
+  sessionLocation,
   structuredRequestInput,
   distanceKm,
   computeEstimate,

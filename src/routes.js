@@ -1,4 +1,4 @@
-import { now, publicUser, validDemoKey, productionStorage, body, seedDemo, computeRequestEstimate } from './domain.js';
+import { now, publicUser, productionStorage, demoSeedPassword, body, seedDemo, computeRequestEstimate } from './domain.js';
 import { store, requireUser } from './store.js';
 
 const cors = {
@@ -39,17 +39,28 @@ async function handlePublicRoutes(request, env, storage, path) {
 
 async function handleDemoRoutes(request, env, storage, path) {
   if (path === '/api/demo/reset' && request.method === 'POST') {
-    if (productionStorage(env) && !validDemoKey(request, env)) return json({ ok: false, error: 'Demo reset disabled' }, 403);
+    if (productionStorage(env)) return forbidden('Demo reset disabled');
     const payload = await body(request);
-    if (payload.seed === true) return json({ ok: true, reset: true, demo: await seedDemo(storage) });
+    if (payload.seed === true) {
+      const password = demoSeedPassword(env);
+      if (!password) return bad('Demo seed password is not configured');
+      return json({ ok: true, reset: true, demo: await seedDemo(storage, password) });
+    }
     await storage.reset();
     return json({ ok: true, reset: true });
   }
   if (path === '/api/demo/seed' && request.method === 'POST') {
-    if (productionStorage(env) && !validDemoKey(request, env)) return json({ ok: false, error: 'Demo seed disabled' }, 403);
-    return json({ ok: true, reset: true, demo: await seedDemo(storage) });
+    if (productionStorage(env)) return forbidden('Demo seed disabled');
+    const password = demoSeedPassword(env);
+    if (!password) return bad('Demo seed password is not configured');
+    return json({ ok: true, reset: true, demo: await seedDemo(storage, password) });
   }
   return null;
+}
+
+function logUnexpectedError(correlationId, error) {
+  const detail = error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : error;
+  console.error('LiveWalk backend error', { correlationId, detail });
 }
 
 async function handleAuthRoutes(request, storage, path) {
@@ -132,10 +143,10 @@ async function handleSessionRoutes(request, storage, segments, user) {
 }
 
 async function handleApiRequest(request, env = {}) {
-  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-  const { url, path, segments } = parseRoute(request);
-  const storage = store(env);
   try {
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+    const { url, path, segments } = parseRoute(request);
+    const storage = store(env);
     const publicResponse = await handlePublicRoutes(request, env, storage, path);
     if (publicResponse) return publicResponse;
     const demoResponse = await handleDemoRoutes(request, env, storage, path);
@@ -152,7 +163,9 @@ async function handleApiRequest(request, env = {}) {
     if (sessionResponse) return sessionResponse;
     return notFound();
   } catch (error) {
-    return json({ ok: false, error: error?.message || 'Backend error' }, 500);
+    const correlationId = crypto.randomUUID();
+    logUnexpectedError(correlationId, error);
+    return json({ ok: false, error: 'Backend error', correlationId }, 500);
   }
 }
 

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import app from '../src/index.js';
+import { rowToRequest } from '../src/store.js';
 
 const subtleProto = Object.getPrototypeOf(globalThis.crypto.subtle);
 const originalDeriveBits = subtleProto.deriveBits;
@@ -32,11 +33,28 @@ async function raw(path, options = {}, env = {}) {
   return { response, body: await response.json() };
 }
 
-const deniedProdReset = await raw('/api/demo/reset', { method: 'POST' }, { HYPERDRIVE: { connectionString: 'postgres://demo.test/livewalk' }, DEMO_ADMIN_KEY: 'demo-key' });
+const demoSeedPassword = crypto.randomUUID();
+const demoAdminKey = crypto.randomUUID();
+const productionDemoEnv = {
+  HYPERDRIVE: { connectionString: 'postgres://demo.test/livewalk' },
+  DEMO_ADMIN_KEY: demoAdminKey,
+  DEMO_SEED_PASSWORD: demoSeedPassword,
+};
+
+const deniedProdReset = await raw('/api/demo/reset', { method: 'POST', headers: { 'x-demo-key': demoAdminKey } }, productionDemoEnv);
 assert.equal(deniedProdReset.response.status, 403);
 assert.equal(deniedProdReset.body.ok, false);
 
-const seeded = await raw('/api/demo/seed', { method: 'POST', headers: { 'x-demo-key': 'demo-key' } }, { DEMO_ADMIN_KEY: 'demo-key' });
+const deniedProdSeed = await raw('/api/demo/seed', { method: 'POST', headers: { 'x-demo-key': demoAdminKey } }, productionDemoEnv);
+assert.equal(deniedProdSeed.response.status, 403);
+assert.equal(deniedProdSeed.body.ok, false);
+
+const unconfiguredSeed = await raw('/api/demo/seed', { method: 'POST' });
+assert.equal(unconfiguredSeed.response.status, 400);
+assert.equal(unconfiguredSeed.body.ok, false);
+assert.match(unconfiguredSeed.body.error, /not configured/i);
+
+const seeded = await raw('/api/demo/seed', { method: 'POST' }, { DEMO_SEED_PASSWORD: demoSeedPassword });
 assert.equal(seeded.response.status, 200);
 assert.equal(seeded.body.ok, true);
 assert.equal(seeded.body.demo.accounts.traveler.email, 'demo.traveler@livewalk.test');
@@ -50,12 +68,19 @@ assert.equal(seeded.body.demo.request.durationMinutes, 45);
 assert.equal(seeded.body.demo.request.estimate.currency, 'USD');
 assert.equal(typeof seeded.body.demo.request.estimate.total, 'number');
 
+const seededLogin = await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'demo.traveler@livewalk.test', password: demoSeedPassword }) });
+assert.equal(seededLogin.body.user.email, 'demo.traveler@livewalk.test');
+
 await call('/api/demo/reset', { method: 'POST' });
-const travelerAuth = await call('/api/auth/register', { method: 'POST', body: JSON.stringify({ role: 'traveler', name: 'Sofia R.', email: 'sofia@example.test', password: 'secret123' }) });
-const guideAuth = await call('/api/auth/register', { method: 'POST', body: JSON.stringify({ role: 'guide', name: 'Yuki Tanaka', email: 'yuki@example.test', password: 'secret123' }) });
-const travelerLogin = await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'sofia@example.test', password: 'secret123' }) });
+const travelerPassword = crypto.randomUUID();
+const guidePassword = crypto.randomUUID();
+const travelerAuth = await call('/api/auth/register', { method: 'POST', body: JSON.stringify({ role: 'traveler', name: 'Sofia R.', email: 'sofia@example.test', password: travelerPassword }) });
+const guideAuth = await call('/api/auth/register', { method: 'POST', body: JSON.stringify({ role: 'guide', name: 'Yuki Tanaka', email: 'yuki@example.test', password: guidePassword }) });
+const travelerLogin = await call('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: 'sofia@example.test', password: travelerPassword }) });
 assert.equal(travelerLogin.body.user.id, travelerAuth.body.user.id);
 assert.equal(highestPbkdf2Iterations, 100000);
+assert.match(travelerAuth.body.user.id, /^usr_[0-9a-f]{32}$/);
+assert.match(guideAuth.body.user.id, /^usr_[0-9a-f]{32}$/);
 const travelerToken = travelerLogin.body.token;
 const guideToken = guideAuth.body.token;
 
@@ -129,6 +154,7 @@ const created = await call('/api/requests', {
 }, travelerToken);
 assert.equal(created.response.status, 201);
 const requestId = created.body.request.id;
+assert.match(requestId, /^req_[0-9a-f]{32}$/);
 assert.equal(created.body.request.travelerName, 'Sofia R.');
 assert.deepEqual(created.body.request.origin, { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 });
 assert.deepEqual(created.body.request.destination, { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 });
@@ -154,6 +180,7 @@ assert.equal(travelerView.body.request.status, 'accepted');
 assert.equal(travelerView.body.request.guide.name, 'Yuki Tanaka');
 
 const sessionId = travelerView.body.request.sessionId;
+assert.match(sessionId, /^sess_[0-9a-f]{32}$/);
 const travelerStartAttempt = await app.fetch(new Request(`https://local.test/api/sessions/${sessionId}/start`, {
   method: 'POST',
   headers: { 'content-type': 'application/json', authorization: `Bearer ${travelerToken}` },
@@ -175,10 +202,74 @@ assert.match(earlyMessageBody.error, /not started/i);
 const started = await call(`/api/sessions/${sessionId}/start`, { method: 'POST' }, guideToken);
 assert.equal(started.body.session.status, 'live');
 
+const invalidLocationAttempt = await app.fetch(new Request(`https://local.test/api/sessions/${sessionId}/location`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${guideToken}` },
+  body: JSON.stringify({ label: 'Current guide location' }),
+}));
+const invalidLocationBody = await invalidLocationAttempt.json();
+assert.equal(invalidLocationAttempt.status, 400);
+assert.equal(invalidLocationBody.ok, false);
+assert.match(invalidLocationBody.error, /valid numeric latitude and longitude/i);
+
+const savedLocation = await call(`/api/sessions/${sessionId}/location`, {
+  method: 'POST',
+  body: JSON.stringify({ label: 'Current guide location', lat: 40.7128, lng: -74.006, progress: 52 }),
+}, guideToken);
+assert.deepEqual(savedLocation.body.session.location, {
+  label: 'Current guide location',
+  lat: 40.7128,
+  lng: -74.006,
+  progress: 52,
+  updatedAt: savedLocation.body.session.location.updatedAt,
+});
+
 await call(`/api/sessions/${sessionId}/messages`, { method: 'POST', body: JSON.stringify({ senderName: 'Spoofed Sender', text: 'Please slow down near the market.' }) }, travelerToken);
 const messages = await call(`/api/sessions/${sessionId}/messages`, {}, guideToken);
 assert.ok(messages.body.messages.some((message) => message.text.includes('slow down')));
 assert.ok(messages.body.messages.some((message) => message.senderRole === 'traveler'));
 assert.ok(messages.body.messages.some((message) => message.senderRole === 'traveler' && message.senderName === 'Sofia R.'));
+
+const readableLegacyRow = {
+  id: 'req_legacy',
+  traveler_id: 'usr_legacy',
+  traveler_name: 'Legacy traveler',
+  origin_point: { label: 'Stored origin', lat: 40.7, lng: -74 },
+  destination_point: { label: 'Stored destination', lat: 40.8, lng: -73.9 },
+  scheduled_start: '2026-07-10T10:30:00Z',
+  duration_minutes: 45,
+  language: 'English',
+  status: 'pending',
+  created_at: '2026-07-10T10:00:00Z',
+  updated_at: '2026-07-10T10:00:00Z',
+};
+assert.equal(rowToRequest(readableLegacyRow).id, 'req_legacy');
+assert.equal(rowToRequest({ ...readableLegacyRow, origin_point: { label: 'Broken origin', lat: 'not-a-number', lng: -74 } }), null);
+
+const backendLogs = [];
+const originalConsoleError = console.error;
+console.error = (...args) => backendLogs.push(args);
+try {
+  const ordinaryRequest = new Request('https://local.test/api/private');
+  const failingRequest = new Proxy(ordinaryRequest, {
+    get(target, property) {
+      if (property === 'headers') return { get() { throw new Error('intentional backend test failure'); } };
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const backendFailure = await app.fetch(failingRequest);
+  const backendFailureBody = await backendFailure.json();
+  assert.equal(backendFailure.status, 500);
+  assert.deepEqual({ ok: backendFailureBody.ok, error: backendFailureBody.error }, { ok: false, error: 'Backend error' });
+  assert.match(backendFailureBody.correlationId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  assert.doesNotMatch(JSON.stringify(backendFailureBody), /intentional backend test failure/);
+  assert.equal(backendLogs.length, 1);
+  assert.equal(backendLogs[0][0], 'LiveWalk backend error');
+  assert.equal(backendLogs[0][1].correlationId, backendFailureBody.correlationId);
+  assert.match(backendLogs[0][1].detail.message, /intentional backend test failure/);
+} finally {
+  console.error = originalConsoleError;
+}
 
 console.log('Auth API cycle verified:', { requestId, sessionId });
