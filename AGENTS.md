@@ -37,3 +37,7 @@
 - During active LiveWalk engineering, report progress every two hours until the work is paused or complete.
 - Scheduled updates must reflect actual remote/GitHub state and use exactly: `Ticket ID | status (done/blocked/in-progress) | blocker (or none) | repo + branch + commit reference`.
 - Do not call work done until it is pushed to `peter-dev`.
+
+## Verified release promotion
+
+- Development edits happen only on `peter-dev`. The sole exception is a verified release promotion: merge `peter-dev` cleanly into `main` and push `main` for production deployment or Android packaging; never edit `main` directly.
