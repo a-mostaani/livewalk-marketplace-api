@@ -117,17 +117,41 @@ function parsePoint(value) {
   return { label, lat, lng };
 }
 
-function parseDurationMinutes(payload) {
-  const direct = Number(payload.durationMinutes ?? payload.duration_minutes);
-  if (Number.isFinite(direct) && direct > 0) return Math.round(direct);
-  const legacy = parseInt(String(payload.duration || ''), 10);
-  return Number.isFinite(legacy) && legacy > 0 ? legacy : 45;
+const ISO_SCHEDULED_START = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})$/;
+
+function parseDurationMinutes(payload = {}) {
+  const value = payload.durationMinutes ?? payload.duration_minutes;
+  if (value === undefined || value === null || String(value).trim() === '') {
+    throw new Error('durationMinutes is required');
+  }
+  const minutes = Number(value);
+  if (!Number.isSafeInteger(minutes) || minutes <= 0) {
+    throw new Error('durationMinutes must be a positive whole number');
+  }
+  return minutes;
 }
 
-function parseScheduledStart(payload) {
-  const value = String(payload.scheduledStart || payload.scheduled_start || payload.scheduledTime || payload.dateTime || '').trim();
+function parseScheduledStart(payload = {}) {
+  const value = String(payload.scheduledStart ?? payload.scheduled_start ?? '').trim();
+  const match = value.match(ISO_SCHEDULED_START);
+  if (!match) throw new Error('scheduledStart must be an ISO-8601 timestamp with a timezone');
+
+  const [, year, month, day, hour, minute, second = '0', fraction = '0'] = match;
+  const calendar = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second), Number(fraction.padEnd(3, '0'))));
+  if (
+    calendar.getUTCFullYear() !== Number(year)
+    || calendar.getUTCMonth() !== Number(month) - 1
+    || calendar.getUTCDate() !== Number(day)
+    || calendar.getUTCHours() !== Number(hour)
+    || calendar.getUTCMinutes() !== Number(minute)
+    || calendar.getUTCSeconds() !== Number(second)
+  ) {
+    throw new Error('scheduledStart must be a valid ISO-8601 timestamp');
+  }
+
   const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date(Date.now() + 86400000).toISOString();
+  if (!Number.isFinite(parsed)) throw new Error('scheduledStart must be a valid ISO-8601 timestamp');
+  return new Date(parsed).toISOString();
 }
 
 function requiredPoint(value, field) {

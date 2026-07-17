@@ -119,6 +119,46 @@ assert.ok(secondQuote.body.estimate.walkingMinutes > firstQuote.body.estimate.wa
 const afterEstimate = await call('/api/requests', {}, travelerToken);
 assert.equal(afterEstimate.body.requests.length, 0);
 
+const missingScheduledStart = await app.fetch(new Request('https://local.test/api/requests/estimate', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${travelerToken}` },
+  body: JSON.stringify({
+    origin: { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 },
+    destination: { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 },
+    durationMinutes: 45,
+  }),
+}));
+const missingScheduledStartBody = await missingScheduledStart.json();
+assert.equal(missingScheduledStart.status, 400);
+assert.match(missingScheduledStartBody.error, /scheduledStart.*ISO-8601/i);
+
+const invalidScheduledStart = await app.fetch(new Request('https://local.test/api/requests/estimate', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${travelerToken}` },
+  body: JSON.stringify({
+    origin: { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 },
+    destination: { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 },
+    scheduledStart: 'tomorrow afternoon',
+    durationMinutes: 45,
+  }),
+}));
+const invalidScheduledStartBody = await invalidScheduledStart.json();
+assert.equal(invalidScheduledStart.status, 400);
+assert.match(invalidScheduledStartBody.error, /scheduledStart.*ISO-8601/i);
+
+const missingDuration = await app.fetch(new Request('https://local.test/api/requests/estimate', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${travelerToken}` },
+  body: JSON.stringify({
+    origin: { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 },
+    destination: { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 },
+    scheduledStart: '2026-07-10T10:30:00+09:00',
+  }),
+}));
+const missingDurationBody = await missingDuration.json();
+assert.equal(missingDuration.status, 400);
+assert.match(missingDurationBody.error, /durationMinutes is required/i);
+
 const invalidQuote = await app.fetch(new Request('https://local.test/api/requests/estimate', {
   method: 'POST',
   headers: { 'content-type': 'application/json', authorization: `Bearer ${travelerToken}` },
@@ -152,6 +192,7 @@ const created = await call('/api/requests', {
     destination: { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 },
     scheduledStart: '2026-07-10T10:30:00+09:00',
     durationMinutes: 45,
+    estimate: { currency: 'USD', distanceKm: 0, walkingMinutes: 0, guideFee: 0, platformFee: 0, total: 1 },
     language: 'English',
     interests: ['Hidden corners', 'Food stops'],
   }),
@@ -168,6 +209,7 @@ assert.equal(created.body.request.durationMinutes, 45);
 assert.equal(created.body.request.estimate.guideFee, 32);
 assert.equal(created.body.request.estimate.platformFee, 6);
 assert.equal(created.body.request.estimate.total, 38);
+assert.deepEqual(created.body.request.estimate, firstQuote.body.estimate);
 
 const pendingForDecliningGuide = await call('/api/requests?status=pending', {}, declineGuideToken);
 assert.equal(pendingForDecliningGuide.body.requests.length, 1);

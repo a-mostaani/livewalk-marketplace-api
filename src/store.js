@@ -10,7 +10,7 @@ memory.declines ??= new Set();
 let PgClient;
 let schemaReady = false;
 
-import { TOKEN_DAYS, now, id, normalizeEmail, normalizeCity, cityForPoint, publicUser, displayName, publicRequest, publicRequestForUser, publicSession, newestFirst, randomBase64, sha256, hashPassword, verifyPassword, bearerToken, parsePoint, parseDurationMinutes, parseScheduledStart, computeEstimate, makeRequest, makeMessage, makeGuide, canReadRequest, canUseSession, sessionLocation } from './domain.js';
+import { TOKEN_DAYS, now, id, normalizeEmail, normalizeCity, cityForPoint, publicUser, displayName, publicRequest, publicRequestForUser, publicSession, newestFirst, randomBase64, sha256, hashPassword, verifyPassword, bearerToken, parsePoint, computeEstimate, makeRequest, makeMessage, makeGuide, canReadRequest, canUseSession, sessionLocation } from './domain.js';
 
 const declineKey = (requestId, guideId) => `${requestId}:${guideId}`;
 function declineConflict() { const error = new Error('Only pending requests can be declined'); error.code = 'REQUEST_NOT_PENDING'; return error; }
@@ -167,7 +167,14 @@ function rowToRequest(row) {
   const origin = parsePoint(row.origin_point ?? row.origin);
   const destination = parsePoint(row.destination_point ?? row.destination);
   if (!origin || !destination) return null;
-  const durationMinutes = Number(row.duration_minutes) || parseDurationMinutes({ duration: row.duration });
+  const persistedDuration = Number(row.duration_minutes);
+  const legacyDuration = Number.parseInt(String(row.duration || ''), 10);
+  const durationMinutes = Number.isSafeInteger(persistedDuration) && persistedDuration > 0
+    ? persistedDuration
+    : (Number.isSafeInteger(legacyDuration) && legacyDuration > 0 ? legacyDuration : 45);
+  const persistedStart = String(row.scheduled_start ?? row.scheduled_time ?? '').trim();
+  const persistedStartMs = Date.parse(persistedStart);
+  const scheduledStart = Number.isFinite(persistedStartMs) ? new Date(persistedStartMs).toISOString() : persistedStart;
   return {
     id: row.id,
     travelerId: row.traveler_id,
@@ -176,7 +183,7 @@ function rowToRequest(row) {
     city: row.city ? normalizeCity(row.city) : cityForPoint(origin),
     origin,
     destination,
-    scheduledStart: parseScheduledStart({ scheduledStart: row.scheduled_start, scheduledTime: row.scheduled_time }),
+    scheduledStart,
     durationMinutes,
     language: row.language,
     interests: Array.isArray(row.interests) ? row.interests : [],
