@@ -15,8 +15,16 @@ const json = (payload, status = 200) => new Response(JSON.stringify(payload), {
 const notFound = (message = 'Not found') => json({ ok: false, error: message }, 404);
 const bad = (message) => json({ ok: false, error: message }, 400);
 const forbidden = (message = 'Not authorized') => json({ ok: false, error: message }, 403);
-const conflict = (message) => json({ ok: false, error: message }, 409);
+const conflict = (message, code) => json({ ok: false, error: message, ...(code ? { code } : {}) }, 409);
 const unauth = (message = 'Login required') => json({ ok: false, error: message }, 401);
+const requestCancelledConflict = () => conflict('Traveler cancelled this walk. No session can start.', 'request_cancelled');
+
+function handledStorageConflict(error) {
+  if (error?.code === 'REQUEST_CANCELLED') return requestCancelledConflict();
+  if (error?.code === 'REQUEST_NOT_CANCELLABLE') return conflict(error.message, 'request_not_cancellable');
+  if (error?.code === 'REQUEST_NOT_PENDING') return conflict(error.message);
+  return null;
+}
 
 function parseRoute(request) {
   const url = new URL(request.url);
@@ -98,9 +106,26 @@ async function handleRequestRoutes(request, storage, url, path, segments, user) 
     return segments[1] === 'bookings' ? json({ ok: true, booking: found.request, session: found.session }) : json({ ok: true, request: found.request, session: found.session });
   }
   if (segments[0] === 'api' && segments[1] === 'requests' && segments[2] && segments[3] === 'accept' && request.method === 'POST') {
-    const accepted = await storage.acceptRequest(segments[2], user);
-    if (!accepted) return notFound('Request not found');
-    return json({ ok: true, request: accepted.request, session: accepted.session });
+    try {
+      const accepted = await storage.acceptRequest(segments[2], user);
+      if (!accepted) return notFound('Request not found');
+      return json({ ok: true, request: accepted.request, session: accepted.session });
+    } catch (error) {
+      const response = handledStorageConflict(error);
+      if (response) return response;
+      throw error;
+    }
+  }
+  if (segments[0] === 'api' && segments[1] === 'requests' && segments[2] && segments[3] === 'cancel' && request.method === 'POST') {
+    try {
+      const cancelled = await storage.cancelRequest(segments[2], user);
+      if (!cancelled) return notFound('Request not found');
+      return json({ ok: true, request: cancelled.request, session: cancelled.session });
+    } catch (error) {
+      const response = handledStorageConflict(error);
+      if (response) return response;
+      throw error;
+    }
   }
   if (segments[0] === 'api' && segments[1] === 'requests' && segments[2] && segments[3] === 'decline' && request.method === 'POST') {
     try {
@@ -108,7 +133,8 @@ async function handleRequestRoutes(request, storage, url, path, segments, user) 
       if (!declined) return notFound('Request not found');
       return json({ ok: true, request: declined });
     } catch (error) {
-      if (error?.code === 'REQUEST_NOT_PENDING') return conflict(error.message);
+      const response = handledStorageConflict(error);
+      if (response) return response;
       throw error;
     }
   }
@@ -120,19 +146,31 @@ async function handleSessionRoutes(request, storage, segments, user) {
   const sessionId = segments[2];
   if (segments[3] === 'start' && request.method === 'POST') {
     if (user.role !== 'guide') return forbidden('Only the guide can start the live session');
-    const started = await storage.startSession(sessionId, user);
-    if (!started) return notFound('Session not found');
-    return json({ ok: true, session: started.session, messages: started.messages });
+    try {
+      const started = await storage.startSession(sessionId, user);
+      if (!started) return notFound('Session not found');
+      return json({ ok: true, session: started.session, request: started.request, messages: started.messages });
+    } catch (error) {
+      const response = handledStorageConflict(error);
+      if (response) return response;
+      throw error;
+    }
   }
   if (segments[3] === 'end' && request.method === 'POST') {
-    const ended = await storage.endSession(sessionId, user);
-    if (!ended) return notFound('Session not found');
-    return json({ ok: true, session: ended.session, messages: ended.messages });
+    try {
+      const ended = await storage.endSession(sessionId, user);
+      if (!ended) return notFound('Session not found');
+      return json({ ok: true, session: ended.session, request: ended.request, messages: ended.messages });
+    } catch (error) {
+      const response = handledStorageConflict(error);
+      if (response) return response;
+      throw error;
+    }
   }
   if (segments[3] === 'status' && request.method === 'GET') {
     const session = await storage.getSession(sessionId, user);
     if (!session) return notFound('Session not found');
-    return json({ ok: true, session: session.session, messages: session.messages });
+    return json({ ok: true, session: session.session, request: session.request, messages: session.messages });
   }
   if (segments[3] === 'messages') {
     const session = await storage.getSession(sessionId, user);
@@ -140,7 +178,11 @@ async function handleSessionRoutes(request, storage, segments, user) {
     if (request.method === 'GET') return json({ ok: true, messages: session.messages });
     if (request.method === 'POST') {
       try { return json({ ok: true, message: await storage.addMessage(sessionId, await body(request), user) }, 201); }
-      catch (error) { return bad(error.message); }
+      catch (error) {
+        const response = handledStorageConflict(error);
+        if (response) return response;
+        return bad(error.message);
+      }
     }
   }
   if (segments[3] === 'location' && request.method === 'POST') {
@@ -148,7 +190,11 @@ async function handleSessionRoutes(request, storage, segments, user) {
       const session = await storage.setLocation(sessionId, await body(request), user);
       if (!session) return notFound('Session not found');
       return json({ ok: true, session });
-    } catch (error) { return bad(error.message); }
+    } catch (error) {
+      const response = handledStorageConflict(error);
+      if (response) return response;
+      return bad(error.message);
+    }
   }
   return null;
 }
