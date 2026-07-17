@@ -272,6 +272,42 @@ assert.equal(endedAgain.body.session.status, 'ended');
 assert.equal(endedAgain.body.session.endedAt, ended.body.session.endedAt);
 assert.equal(endedAgain.body.messages.filter((message) => message.text === 'The live walk session ended.').length, endMessageCount);
 
+const cancellable = await call('/api/requests', {
+  method: 'POST',
+  body: JSON.stringify({
+    origin: { label: 'Shibuya Station Hachiko Gate', lat: 35.6591, lng: 139.7005 },
+    destination: { label: 'Meiji Shrine forest entrance', lat: 35.6764, lng: 139.6993 },
+    scheduledStart: '2026-07-10T11:30:00+09:00',
+    durationMinutes: 45,
+    language: 'English',
+    interests: ['Hidden corners'],
+  }),
+}, travelerToken);
+const cancelledRequestId = cancellable.body.request.id;
+const cancellationAccepted = await call(`/api/requests/${cancelledRequestId}/accept`, { method: 'POST' }, guideToken);
+const cancelledSessionId = cancellationAccepted.body.session.id;
+assert.equal(cancellationAccepted.body.request.status, 'accepted');
+assert.equal(cancellationAccepted.body.session.status, 'ready');
+
+const travellerCancellation = await call(`/api/requests/${cancelledRequestId}/cancel`, { method: 'POST' }, travelerToken);
+assert.equal(travellerCancellation.body.request.status, 'cancelled');
+assert.equal(travellerCancellation.body.session.status, 'cancelled');
+
+const guideCancelledPoll = await call(`/api/sessions/${cancelledSessionId}/status`, {}, guideToken);
+assert.equal(guideCancelledPoll.body.request.status, 'cancelled');
+assert.equal(guideCancelledPoll.body.session.status, 'cancelled');
+
+const guideStartCancelled = await raw(`/api/sessions/${cancelledSessionId}/start`, {
+  method: 'POST',
+  headers: { authorization: `Bearer ${guideToken}` },
+});
+assert.equal(guideStartCancelled.response.status, 409);
+assert.deepEqual(guideStartCancelled.body, {
+  ok: false,
+  error: 'Traveler cancelled this walk. No session can start.',
+  code: 'request_cancelled',
+});
+
 const readableLegacyRow = {
   id: 'req_legacy',
   traveler_id: 'usr_legacy',
