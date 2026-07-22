@@ -103,6 +103,61 @@ function demoSeedPassword(env) {
   return password || null;
 }
 
+const LIVEKIT_TOKEN_TTL_SECONDS = 600;
+
+function livekitConfig(env) {
+  const apiKey = String(env?.LIVEKIT_API_KEY || '').trim();
+  const apiSecret = String(env?.LIVEKIT_API_SECRET || '').trim();
+  const wsUrl = String(env?.LIVEKIT_URL || env?.LIVEKIT_WS_URL || '').trim();
+  if (!apiKey || !apiSecret || !wsUrl) return null;
+  try {
+    const parsed = new URL(wsUrl);
+    if (parsed.protocol !== 'wss:') return null;
+  } catch {
+    return null;
+  }
+  return { apiKey, apiSecret, wsUrl };
+}
+
+function base64UrlFromBytes(bytes) {
+  return bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlFromString(value) {
+  return base64UrlFromBytes(new TextEncoder().encode(value));
+}
+
+async function signLivekitToken(apiSecret, payload) {
+  const encodedHeader = base64UrlFromString(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const encodedPayload = base64UrlFromString(JSON.stringify(payload));
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(apiSecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signingInput)));
+  return `${signingInput}.${base64UrlFromBytes(signature)}`;
+}
+
+async function makeLivekitToken({ apiKey, apiSecret, sessionId, roomName, identity, name, role, canPublishSources }) {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const payload = {
+    iss: apiKey,
+    sub: identity,
+    name,
+    jti: crypto.randomUUID(),
+    metadata: JSON.stringify({ sessionId, role }),
+    iat: issuedAt,
+    nbf: issuedAt - 10,
+    exp: issuedAt + LIVEKIT_TOKEN_TTL_SECONDS,
+    video: {
+      room: roomName,
+      roomJoin: true,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishSources,
+    },
+  };
+  return signLivekitToken(apiSecret, payload);
+}
+
 async function body(request) {
   if (request.method === 'GET') return {};
   try { return await request.json(); } catch { return {}; }
@@ -117,17 +172,41 @@ function parsePoint(value) {
   return { label, lat, lng };
 }
 
-function parseDurationMinutes(payload) {
-  const direct = Number(payload.durationMinutes ?? payload.duration_minutes);
-  if (Number.isFinite(direct) && direct > 0) return Math.round(direct);
-  const legacy = parseInt(String(payload.duration || ''), 10);
-  return Number.isFinite(legacy) && legacy > 0 ? legacy : 45;
+const ISO_SCHEDULED_START = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})$/;
+
+function parseDurationMinutes(payload = {}) {
+  const value = payload.durationMinutes ?? payload.duration_minutes;
+  if (value === undefined || value === null || String(value).trim() === '') {
+    throw new Error('durationMinutes is required');
+  }
+  const minutes = Number(value);
+  if (!Number.isSafeInteger(minutes) || minutes <= 0) {
+    throw new Error('durationMinutes must be a positive whole number');
+  }
+  return minutes;
 }
 
-function parseScheduledStart(payload) {
-  const value = String(payload.scheduledStart || payload.scheduled_start || payload.scheduledTime || payload.dateTime || '').trim();
+function parseScheduledStart(payload = {}) {
+  const value = String(payload.scheduledStart ?? payload.scheduled_start ?? '').trim();
+  const match = value.match(ISO_SCHEDULED_START);
+  if (!match) throw new Error('scheduledStart must be an ISO-8601 timestamp with a timezone');
+
+  const [, year, month, day, hour, minute, second = '0', fraction = '0'] = match;
+  const calendar = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second), Number(fraction.padEnd(3, '0'))));
+  if (
+    calendar.getUTCFullYear() !== Number(year)
+    || calendar.getUTCMonth() !== Number(month) - 1
+    || calendar.getUTCDate() !== Number(day)
+    || calendar.getUTCHours() !== Number(hour)
+    || calendar.getUTCMinutes() !== Number(minute)
+    || calendar.getUTCSeconds() !== Number(second)
+  ) {
+    throw new Error('scheduledStart must be a valid ISO-8601 timestamp');
+  }
+
   const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date(Date.now() + 86400000).toISOString();
+  if (!Number.isFinite(parsed)) throw new Error('scheduledStart must be a valid ISO-8601 timestamp');
+  return new Date(parsed).toISOString();
 }
 
 function requiredPoint(value, field) {
@@ -287,6 +366,9 @@ export {
   bearerToken,
   productionStorage,
   demoSeedPassword,
+  LIVEKIT_TOKEN_TTL_SECONDS,
+  livekitConfig,
+  makeLivekitToken,
   body,
   parsePoint,
   parseDurationMinutes,
