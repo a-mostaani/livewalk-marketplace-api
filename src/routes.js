@@ -1,4 +1,4 @@
-import { now, publicUser, productionStorage, demoSeedPassword, body, seedDemo, computeRequestEstimate, livekitApiKey, livekitApiSecret, LIVEKIT_TOKEN_TTL_SECONDS } from './domain.js';
+import { now, publicUser, productionStorage, demoSeedPassword, body, seedDemo, computeRequestEstimate, livekitConfig } from './domain.js';
 import { store, requireUser } from './store.js';
 
 const cors = {
@@ -17,6 +17,7 @@ const bad = (message) => json({ ok: false, error: message }, 400);
 const forbidden = (message = 'Not authorized') => json({ ok: false, error: message }, 403);
 const conflict = (message, code) => json({ ok: false, error: message, ...(code ? { code } : {}) }, 409);
 const unauth = (message = 'Login required') => json({ ok: false, error: message }, 401);
+const unavailable = (message = 'Service unavailable') => json({ ok: false, error: message }, 503);
 const requestCancelledConflict = () => conflict('Traveler cancelled this walk. No session can start.', 'request_cancelled');
 
 function handledStorageConflict(error) {
@@ -24,6 +25,7 @@ function handledStorageConflict(error) {
   if (error?.code === 'REQUEST_NOT_CANCELLABLE') return conflict(error.message, 'request_not_cancellable');
   if (error?.code === 'REQUEST_NOT_PENDING') return conflict(error.message);
   if (error?.code === 'NOT_AUTHORIZED') return forbidden(error.message);
+  if (error?.code === 'MEDIA_NOT_CONFIGURED') return unavailable();
   return null;
 }
 
@@ -197,14 +199,12 @@ async function handleSessionRoutes(request, storage, segments, user, env) {
       return bad(error.message);
     }
   }
-  if (segments[3] === 'livekit-token' && request.method === 'POST') {
-    const apiKey = livekitApiKey(env);
-    const apiSecret = livekitApiSecret(env);
-    if (!apiKey || !apiSecret) return bad('LiveKit is not configured');
+  if (segments[3] === 'media-token' && request.method === 'POST') {
+    const config = livekitConfig(env);
     try {
-      const token = await storage.mintLiveKitToken(sessionId, user, { apiKey, apiSecret });
-      if (!token) return notFound('Session not found');
-      return json({ ok: true, token, room: sessionId, identity: user.id, canPublish: user.role === 'guide', expiresIn: LIVEKIT_TOKEN_TTL_SECONDS });
+      const result = await storage.mintLiveKitToken(sessionId, user, config);
+      if (!result) return notFound('Session not found');
+      return json({ token: result.token, wsUrl: config.wsUrl, room: result.room, role: result.role });
     } catch (error) {
       const response = handledStorageConflict(error);
       if (response) return response;

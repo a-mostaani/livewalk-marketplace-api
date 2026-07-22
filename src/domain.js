@@ -105,14 +105,18 @@ function demoSeedPassword(env) {
 
 const LIVEKIT_TOKEN_TTL_SECONDS = 600;
 
-function livekitApiKey(env) {
-  const key = String(env?.LIVEKIT_API_KEY || '').trim();
-  return key || null;
-}
-
-function livekitApiSecret(env) {
-  const secret = String(env?.LIVEKIT_API_SECRET || '').trim();
-  return secret || null;
+function livekitConfig(env) {
+  const apiKey = String(env?.LIVEKIT_API_KEY || '').trim();
+  const apiSecret = String(env?.LIVEKIT_API_SECRET || '').trim();
+  const wsUrl = String(env?.LIVEKIT_URL || env?.LIVEKIT_WS_URL || '').trim();
+  if (!apiKey || !apiSecret || !wsUrl) return null;
+  try {
+    const parsed = new URL(wsUrl);
+    if (parsed.protocol !== 'wss:') return null;
+  } catch {
+    return null;
+  }
+  return { apiKey, apiSecret, wsUrl };
 }
 
 function base64UrlFromBytes(bytes) {
@@ -132,23 +136,23 @@ async function signLivekitToken(apiSecret, payload) {
   return `${signingInput}.${base64UrlFromBytes(signature)}`;
 }
 
-// LiveKit access tokens are HS256 JWTs signed with the project API secret - see
-// https://docs.livekit.io/home/get-started/authentication/. Signed by hand with
-// Web Crypto (no Node `crypto`/jsonwebtoken) since this backend runs on Workers.
-async function makeLivekitToken({ apiKey, apiSecret, roomName, identity, name, canPublish, canSubscribe, canPublishSources }) {
+async function makeLivekitToken({ apiKey, apiSecret, sessionId, roomName, identity, name, role, canPublishSources }) {
   const issuedAt = Math.floor(Date.now() / 1000);
   const payload = {
     iss: apiKey,
     sub: identity,
     name,
+    jti: crypto.randomUUID(),
+    metadata: JSON.stringify({ sessionId, role }),
+    iat: issuedAt,
     nbf: issuedAt - 10,
     exp: issuedAt + LIVEKIT_TOKEN_TTL_SECONDS,
     video: {
       room: roomName,
       roomJoin: true,
-      canPublish,
-      canSubscribe,
-      ...(canPublishSources ? { canPublishSources } : {}),
+      canPublish: true,
+      canSubscribe: true,
+      canPublishSources,
     },
   };
   return signLivekitToken(apiSecret, payload);
@@ -363,8 +367,7 @@ export {
   productionStorage,
   demoSeedPassword,
   LIVEKIT_TOKEN_TTL_SECONDS,
-  livekitApiKey,
-  livekitApiSecret,
+  livekitConfig,
   makeLivekitToken,
   body,
   parsePoint,
