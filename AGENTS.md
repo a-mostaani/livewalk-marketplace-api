@@ -26,7 +26,6 @@
 - Commit meaningful changes early with a greppable ticket/action message, for example, LW-15b: restore traveler deps. For operational project-rule changes use LW-OPS: action.
 - Push peter-dev before reporting completion. If no source changed, explicitly report that no commit was needed.
 - Keep node_modules/, .expo/, build/, .venv/, dist/, and all other regenerable dependency, build, and temporary trees out of the persistent workspace. Record the reason for any persistent exception for a large downloaded SDK component.
-- Known fragile area: LW-10b was accidentally built on main — check the target branch explicitly before starting work, not just at session start.
 
 ## Secrets and completion bar
 

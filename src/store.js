@@ -10,22 +10,12 @@ memory.declines ??= new Set();
 let PgClient;
 let schemaReady = false;
 
-import { TOKEN_DAYS, now, id, normalizeEmail, normalizeCity, cityForPoint, publicUser, displayName, publicRequest, publicRequestForUser, publicSession, newestFirst, randomBase64, sha256, hashPassword, verifyPassword, bearerToken, parsePoint, computeEstimate, makeRequest, makeMessage, makeGuide, canReadRequest, canUseSession, sessionLocation, makeLivekitToken } from './domain.js';
+import { TOKEN_DAYS, now, id, normalizeEmail, normalizeCity, cityForPoint, publicUser, displayName, publicRequest, publicRequestForUser, publicSession, newestFirst, randomBase64, sha256, hashPassword, verifyPassword, bearerToken, parsePoint, computeEstimate, makeRequest, makeMessage, makeGuide, canReadRequest, canUseSession, sessionLocation } from './domain.js';
 
 const declineKey = (requestId, guideId) => `${requestId}:${guideId}`;
 function declineConflict() { const error = new Error('Only pending requests can be declined'); error.code = 'REQUEST_NOT_PENDING'; return error; }
 function requestCancelledConflict() { const error = new Error('Traveler cancelled this walk. No session can start.'); error.code = 'REQUEST_CANCELLED'; return error; }
 function cancelConflict() { const error = new Error('Only pending or accepted walks can be cancelled'); error.code = 'REQUEST_NOT_CANCELLABLE'; return error; }
-function notAuthorizedForSessionError() { const error = new Error('Not authorized for this session'); error.code = 'NOT_AUTHORIZED'; return error; }
-function mediaServiceUnavailableError() { const error = new Error('Media service unavailable'); error.code = 'MEDIA_NOT_CONFIGURED'; return error; }
-
-function livekitGrantForRole(user) {
-  return user.role === 'guide'
-    ? { canPublishSources: ['camera', 'microphone'] }
-    : { canPublishSources: ['microphone'] };
-}
-
-const mediaRoomName = (sessionId) => `livewalk-session-${sessionId}`;
 
 function makeMemoryStore() {
   async function createAuthSession(user) {
@@ -168,18 +158,6 @@ function makeMemoryStore() {
       if (session.status !== 'live') throw new Error('Live session has not started yet');
       session.location = sessionLocation(payload);
       session.updatedAt = now(); return publicSession(session);
-    },
-    async mintLiveKitToken(sessionId, user, config) {
-      const session = memory.liveSessions.get(sessionId);
-      const request = session ? memory.requests.get(session.requestId) : null;
-      if (!session) return null;
-      if (!canUseSession(user, request)) throw notAuthorizedForSessionError();
-      if (request.status === 'cancelled' || session.status === 'cancelled') throw requestCancelledConflict();
-      if (session.status === 'ended') throw new Error('Live session has ended');
-      if (!config) throw mediaServiceUnavailableError();
-      const roomName = mediaRoomName(session.id);
-      const token = await makeLivekitToken({ ...config, sessionId: session.id, roomName, identity: user.id, name: displayName(user.name, user.role === 'guide' ? 'Guide' : 'Traveler'), role: user.role, ...livekitGrantForRole(user) });
-      return { token, room: roomName, role: user.role };
     },
   };
 }
@@ -365,7 +343,6 @@ function makeDbStore(env, useDb = (operation) => withDb(env, operation)) {
     async endSession(sessionId, user) { return useDb(async (client) => { await client.query('BEGIN'); try { const session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1 FOR UPDATE', [sessionId])).rows[0]); const req = session ? rowToRequest((await client.query('SELECT * FROM livewalk_requests WHERE id=$1 FOR UPDATE', [session.requestId])).rows[0]) : null; if (!session || !canUseSession(user, req)) { await client.query('ROLLBACK'); return null; } if (req.status === 'cancelled' || session.status === 'cancelled') throw requestCancelledConflict(); if (session.status === 'ended') { await client.query('COMMIT'); return readSession(client, sessionId, user); } const endedAt = now(); await client.query('UPDATE livewalk_sessions SET status=$1, ended_at=COALESCE(ended_at,$2), updated_at=$2 WHERE id=$3', ['ended', endedAt, sessionId]); await client.query('UPDATE livewalk_requests SET status=$1, updated_at=$2 WHERE id=$3', ['completed', endedAt, session.requestId]); await client.query('INSERT INTO livewalk_messages (id, session_id, sender_role, sender_name, text, created_at) VALUES ($1,$2,$3,$4,$5,$6)', [id('msg'), sessionId, 'system', 'LiveWalk', 'The live walk session ended.', endedAt]); await client.query('COMMIT'); return readSession(client, sessionId, user); } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; } }); },
     async addMessage(sessionId, payload, user) { return withDb(env, async (client) => { const session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1', [sessionId])).rows[0]); const req = session ? rowToRequest((await client.query(requestSelect('WHERE r.id=$1'), [session.requestId])).rows[0]) : null; if (!session || !canUseSession(user, req)) return null; if (req.status === 'cancelled' || session.status === 'cancelled') throw requestCancelledConflict(); if (session.status !== 'live') throw new Error('Live session has not started yet'); const message = makeMessage(sessionId, payload, user); await client.query('INSERT INTO livewalk_messages (id, session_id, sender_role, sender_name, text, created_at) VALUES ($1,$2,$3,$4,$5,$6)', [message.id, message.sessionId, message.senderRole, message.senderName, message.text, message.createdAt]); return message; }); },
     async setLocation(sessionId, payload, user) { return withDb(env, async (client) => { const session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1', [sessionId])).rows[0]); const req = session ? rowToRequest((await client.query(requestSelect('WHERE r.id=$1'), [session.requestId])).rows[0]) : null; if (!session || !canUseSession(user, req) || user.role !== 'guide') return null; if (req.status === 'cancelled' || session.status === 'cancelled') throw requestCancelledConflict(); if (session.status !== 'live') throw new Error('Live session has not started yet'); const location = sessionLocation(payload); const result = await client.query('UPDATE livewalk_sessions SET location=$1::jsonb, updated_at=$2 WHERE id=$3 RETURNING *', [JSON.stringify(location), now(), sessionId]); return publicSession(rowToSession(result.rows[0])); }); },
-    async mintLiveKitToken(sessionId, user, config) { return withDb(env, async (client) => { const session = rowToSession((await client.query('SELECT * FROM livewalk_sessions WHERE id=$1', [sessionId])).rows[0]); const req = session ? rowToRequest((await client.query(requestSelect('WHERE r.id=$1'), [session.requestId])).rows[0]) : null; if (!session) return null; if (!canUseSession(user, req)) throw notAuthorizedForSessionError(); if (req.status === 'cancelled' || session.status === 'cancelled') throw requestCancelledConflict(); if (session.status === 'ended') throw new Error('Live session has ended'); if (!config) throw mediaServiceUnavailableError(); const roomName = mediaRoomName(session.id); const token = await makeLivekitToken({ ...config, sessionId: session.id, roomName, identity: user.id, name: displayName(user.name, user.role === 'guide' ? 'Guide' : 'Traveler'), role: user.role, ...livekitGrantForRole(user) }); return { token, room: roomName, role: user.role }; }); },
   };
 }
 

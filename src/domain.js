@@ -103,61 +103,6 @@ function demoSeedPassword(env) {
   return password || null;
 }
 
-const LIVEKIT_TOKEN_TTL_SECONDS = 600;
-
-function livekitConfig(env) {
-  const apiKey = String(env?.LIVEKIT_API_KEY || '').trim();
-  const apiSecret = String(env?.LIVEKIT_API_SECRET || '').trim();
-  const wsUrl = String(env?.LIVEKIT_URL || env?.LIVEKIT_WS_URL || '').trim();
-  if (!apiKey || !apiSecret || !wsUrl) return null;
-  try {
-    const parsed = new URL(wsUrl);
-    if (parsed.protocol !== 'wss:') return null;
-  } catch {
-    return null;
-  }
-  return { apiKey, apiSecret, wsUrl };
-}
-
-function base64UrlFromBytes(bytes) {
-  return bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function base64UrlFromString(value) {
-  return base64UrlFromBytes(new TextEncoder().encode(value));
-}
-
-async function signLivekitToken(apiSecret, payload) {
-  const encodedHeader = base64UrlFromString(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const encodedPayload = base64UrlFromString(JSON.stringify(payload));
-  const signingInput = `${encodedHeader}.${encodedPayload}`;
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(apiSecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signingInput)));
-  return `${signingInput}.${base64UrlFromBytes(signature)}`;
-}
-
-async function makeLivekitToken({ apiKey, apiSecret, sessionId, roomName, identity, name, role, canPublishSources }) {
-  const issuedAt = Math.floor(Date.now() / 1000);
-  const payload = {
-    iss: apiKey,
-    sub: identity,
-    name,
-    jti: crypto.randomUUID(),
-    metadata: JSON.stringify({ sessionId, role }),
-    iat: issuedAt,
-    nbf: issuedAt - 10,
-    exp: issuedAt + LIVEKIT_TOKEN_TTL_SECONDS,
-    video: {
-      room: roomName,
-      roomJoin: true,
-      canPublish: true,
-      canSubscribe: true,
-      canPublishSources,
-    },
-  };
-  return signLivekitToken(apiSecret, payload);
-}
-
 async function body(request) {
   if (request.method === 'GET') return {};
   try { return await request.json(); } catch { return {}; }
@@ -366,9 +311,6 @@ export {
   bearerToken,
   productionStorage,
   demoSeedPassword,
-  LIVEKIT_TOKEN_TTL_SECONDS,
-  livekitConfig,
-  makeLivekitToken,
   body,
   parsePoint,
   parseDurationMinutes,
