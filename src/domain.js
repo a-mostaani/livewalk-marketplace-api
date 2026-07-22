@@ -103,6 +103,57 @@ function demoSeedPassword(env) {
   return password || null;
 }
 
+const LIVEKIT_TOKEN_TTL_SECONDS = 600;
+
+function livekitApiKey(env) {
+  const key = String(env?.LIVEKIT_API_KEY || '').trim();
+  return key || null;
+}
+
+function livekitApiSecret(env) {
+  const secret = String(env?.LIVEKIT_API_SECRET || '').trim();
+  return secret || null;
+}
+
+function base64UrlFromBytes(bytes) {
+  return bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlFromString(value) {
+  return base64UrlFromBytes(new TextEncoder().encode(value));
+}
+
+async function signLivekitToken(apiSecret, payload) {
+  const encodedHeader = base64UrlFromString(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const encodedPayload = base64UrlFromString(JSON.stringify(payload));
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(apiSecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signingInput)));
+  return `${signingInput}.${base64UrlFromBytes(signature)}`;
+}
+
+// LiveKit access tokens are HS256 JWTs signed with the project API secret - see
+// https://docs.livekit.io/home/get-started/authentication/. Signed by hand with
+// Web Crypto (no Node `crypto`/jsonwebtoken) since this backend runs on Workers.
+async function makeLivekitToken({ apiKey, apiSecret, roomName, identity, name, canPublish, canSubscribe, canPublishSources }) {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const payload = {
+    iss: apiKey,
+    sub: identity,
+    name,
+    nbf: issuedAt - 10,
+    exp: issuedAt + LIVEKIT_TOKEN_TTL_SECONDS,
+    video: {
+      room: roomName,
+      roomJoin: true,
+      canPublish,
+      canSubscribe,
+      ...(canPublishSources ? { canPublishSources } : {}),
+    },
+  };
+  return signLivekitToken(apiSecret, payload);
+}
+
 async function body(request) {
   if (request.method === 'GET') return {};
   try { return await request.json(); } catch { return {}; }
@@ -311,6 +362,10 @@ export {
   bearerToken,
   productionStorage,
   demoSeedPassword,
+  LIVEKIT_TOKEN_TTL_SECONDS,
+  livekitApiKey,
+  livekitApiSecret,
+  makeLivekitToken,
   body,
   parsePoint,
   parseDurationMinutes,

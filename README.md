@@ -18,6 +18,10 @@ Small shared marketplace API for the first LiveWalk end-to-end booking cycle. It
 - `POST /api/sessions/:id/messages` — add a shared session message
 - `GET /api/sessions/:id/messages` — list shared session messages
 - `POST /api/sessions/:id/location` — update guide/demo location
+- `POST /api/sessions/:id/livekit-token` — mint a short-lived (10 min) LiveKit
+  room token for a `live` session; guide gets publish+subscribe, traveler
+  gets subscribe-only. Requires `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` env
+  vars (not exposed to clients via `extra`).
 
 ## Verification
 

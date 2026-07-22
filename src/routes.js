@@ -1,4 +1,4 @@
-import { now, publicUser, productionStorage, demoSeedPassword, body, seedDemo, computeRequestEstimate } from './domain.js';
+import { now, publicUser, productionStorage, demoSeedPassword, body, seedDemo, computeRequestEstimate, livekitApiKey, livekitApiSecret, LIVEKIT_TOKEN_TTL_SECONDS } from './domain.js';
 import { store, requireUser } from './store.js';
 
 const cors = {
@@ -23,6 +23,7 @@ function handledStorageConflict(error) {
   if (error?.code === 'REQUEST_CANCELLED') return requestCancelledConflict();
   if (error?.code === 'REQUEST_NOT_CANCELLABLE') return conflict(error.message, 'request_not_cancellable');
   if (error?.code === 'REQUEST_NOT_PENDING') return conflict(error.message);
+  if (error?.code === 'NOT_AUTHORIZED') return forbidden(error.message);
   return null;
 }
 
@@ -141,7 +142,7 @@ async function handleRequestRoutes(request, storage, url, path, segments, user) 
   return null;
 }
 
-async function handleSessionRoutes(request, storage, segments, user) {
+async function handleSessionRoutes(request, storage, segments, user, env) {
   if (segments[0] !== 'api' || segments[1] !== 'sessions' || !segments[2]) return null;
   const sessionId = segments[2];
   if (segments[3] === 'start' && request.method === 'POST') {
@@ -196,6 +197,20 @@ async function handleSessionRoutes(request, storage, segments, user) {
       return bad(error.message);
     }
   }
+  if (segments[3] === 'livekit-token' && request.method === 'POST') {
+    const apiKey = livekitApiKey(env);
+    const apiSecret = livekitApiSecret(env);
+    if (!apiKey || !apiSecret) return bad('LiveKit is not configured');
+    try {
+      const token = await storage.mintLiveKitToken(sessionId, user, { apiKey, apiSecret });
+      if (!token) return notFound('Session not found');
+      return json({ ok: true, token, room: sessionId, identity: user.id, canPublish: user.role === 'guide', expiresIn: LIVEKIT_TOKEN_TTL_SECONDS });
+    } catch (error) {
+      const response = handledStorageConflict(error);
+      if (response) return response;
+      return bad(error.message);
+    }
+  }
   return null;
 }
 
@@ -216,7 +231,7 @@ async function handleApiRequest(request, env = {}) {
 
     const requestResponse = await handleRequestRoutes(request, storage, url, path, segments, user);
     if (requestResponse) return requestResponse;
-    const sessionResponse = await handleSessionRoutes(request, storage, segments, user);
+    const sessionResponse = await handleSessionRoutes(request, storage, segments, user, env);
     if (sessionResponse) return sessionResponse;
     return notFound();
   } catch (error) {
